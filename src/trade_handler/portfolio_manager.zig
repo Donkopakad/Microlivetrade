@@ -271,7 +271,6 @@ pub const PortfolioManager = struct {
     }
 
     fn currentCandleStart(self: *PortfolioManager, symbol_name: []const u8, timestamp: i128) i128 {
-        _ = self;
         _ = symbol_name;
         const duration_ns = self.candle_duration_ns;
         const elapsed_since_epoch = timestamp;
