@@ -5,6 +5,7 @@ const portfolio_manager = @import("portfolio_manager.zig");
 const PortfolioManager = portfolio_manager.PortfolioManager;
 const PositionSide = portfolio_manager.PositionSide;
 const TradingSignal = types.TradingSignal;
+const binance = @import("binance_futures_client.zig");
 
 const EXIT_INTERVAL_NS: u64 = 500_000_000; // 500ms
 
@@ -19,7 +20,7 @@ pub const TradeHandler = struct {
     portfolio_mutex: std.Thread.Mutex,
     portfolio_manager: PortfolioManager,
 
-    pub fn init(allocator: std.mem.Allocator, symbol_map: *const SymbolMap) TradeHandler {
+    pub fn init(allocator: std.mem.Allocator, symbol_map: *const SymbolMap, binance_client: *binance.BinanceFuturesClient) TradeHandler {
         return TradeHandler{
             .allocator = allocator,
             .signal_queue = std.ArrayList(TradingSignal).init(allocator),
@@ -29,7 +30,7 @@ pub const TradeHandler = struct {
             .mutex = .{},
             .condition = .{},
             .portfolio_mutex = .{},
-            .portfolio_manager = PortfolioManager.init(allocator, symbol_map),
+            .portfolio_manager = PortfolioManager.init(allocator, symbol_map, binance_client),
         };
     }
 
