@@ -218,7 +218,7 @@ pub const BinanceFuturesClient = struct {
 
         const order_id_val = obj.get("orderId") orelse return error.MissingOrderId;
         const order_id: i64 = switch (order_id_val) {
-            .integer => |i| @intCast(i64, i),
+            .integer => |i| @intCast(i),
             else => return error.MissingOrderId,
         };
 
@@ -318,7 +318,9 @@ pub const BinanceFuturesClient = struct {
         var precision: u8 = 3;
 
         if (sym_obj.get("quantityPrecision")) |prec_val| {
-            if (prec_val == .integer) precision = @intCast(u8, prec_val.integer);
+            if (prec_val == .integer) {
+                precision = @intCast(prec_val.integer);
+            }
         }
 
         if (sym_obj.get("filters")) |filters_val| {
@@ -396,7 +398,7 @@ pub const BinanceFuturesClient = struct {
 
         var req = try self.http_client.open(method, uri, .{ .server_header_buffer = try self.allocator.alloc(u8, 8192) });
         defer req.deinit();
-        req.headers.append("X-MBX-APIKEY", self.api_key) catch {};
+        req.headers.appendValue("X-MBX-APIKEY", self.api_key) catch {};
 
         try req.send();
         try req.wait();
