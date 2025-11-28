@@ -288,8 +288,9 @@ pub const BinanceFuturesClient = struct {
             return error.QuantityTooSmall;
         }
         const precision_width: usize = @intCast(info.quantity_precision);
-        const pow10 = std.math.pow(f64, 10.0, @floatFromInt(precision_width));
-        return std.math.round(adjusted_qty * pow10) / pow10;
+        const pow10 = std.math.pow(f64, 10, @floatFromInt(precision_width));
+        const rounded = std.math.floor(adjusted_qty * pow10) / pow10;
+        return rounded;
     }
 
     fn ensureSymbolInfo(self: *BinanceFuturesClient, symbol: []const u8) !SymbolInfo {
@@ -426,7 +427,7 @@ pub const BinanceFuturesClient = struct {
 
         var req = try self.http_client.open(method, uri, .{ .server_header_buffer = try self.allocator.alloc(u8, 8192) });
         defer req.deinit();
-        req.headers.append("X-MBX-APIKEY", self.api_key) catch {};
+        req.headers.set("X-MBX-APIKEY", self.api_key) catch {};
 
         try req.send();
         try req.wait();
