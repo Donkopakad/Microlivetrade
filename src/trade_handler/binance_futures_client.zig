@@ -166,7 +166,7 @@ pub const BinanceFuturesClient = struct {
         reduce_only: bool,
     ) !OrderResult {
         if (!self.enabled) return error.LiveTradingDisabled;
-        const info = try self.ensureSymbolInfo(symbol);
+        _ = try self.ensureSymbolInfo(symbol);
         const norm_qty = try self.normalizeQuantity(symbol, quantity, try self.getMarkPrice(symbol));
         const client_order_id = try self.generateClientOrderId(symbol, side, position_side, reduce_only);
 
@@ -323,6 +323,11 @@ pub const BinanceFuturesClient = struct {
         const symbols = root.object.get("symbols") orelse return error.ExchangeInfoFailed;
         if (symbols != .array) return error.ExchangeInfoFailed;
 
+        var default_step_size: f64 = 0.0001;
+        var default_min_qty: f64 = default_step_size;
+        var default_min_notional: f64 = 5.0;
+        var default_precision: u8 = 8;
+
         for (symbols.array.items) |sym| {
             if (sym != .object) continue;
             const sym_obj = sym.object;
@@ -330,10 +335,10 @@ pub const BinanceFuturesClient = struct {
             if (symbol_val != .string) continue;
             if (!std.mem.eql(u8, symbol_val.string, symbol)) continue;
 
-            var step_size: f64 = 0.0;
-            var min_qty: f64 = 0.0;
-            var min_notional: f64 = 0.0;
-            var precision: u8 = 8;
+            var step_size: f64 = default_step_size;
+            var min_qty: f64 = default_min_qty;
+            var min_notional: f64 = default_min_notional;
+            var precision: u8 = default_precision;
 
             if (sym_obj.get("quantityPrecision")) |prec_val| {
                 if (prec_val == .integer) {
@@ -377,10 +382,10 @@ pub const BinanceFuturesClient = struct {
         }
 
         return SymbolInfo{
-            .step_size = step_size,
-            .min_qty = min_qty,
-            .min_notional = min_notional,
-            .quantity_precision = precision,
+            .step_size = default_step_size,
+            .min_qty = default_min_qty,
+            .min_notional = default_min_notional,
+            .quantity_precision = default_precision,
         };
     }
 
@@ -424,7 +429,7 @@ pub const BinanceFuturesClient = struct {
 
         var req = try self.http_client.open(method, uri, .{ .server_header_buffer = try self.allocator.alloc(u8, 8192) });
         defer req.deinit();
-        req.headers.append(.{ .name = "X-MBX-APIKEY", .value = self.api_key }) catch {};
+        req.headers.appendValue("X-MBX-APIKEY", self.api_key) catch {};
 
         try req.send();
         try req.wait();
