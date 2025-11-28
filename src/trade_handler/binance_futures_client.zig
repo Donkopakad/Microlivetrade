@@ -166,47 +166,54 @@ pub const BinanceFuturesClient = struct {
         reduce_only: bool,
     ) !OrderResult {
         if (!self.enabled) return error.LiveTradingDisabled;
-
-        const price = try self.getMarkPrice(symbol);
-        const normalized_qty = try self.normalizeQuantity(symbol, quantity, price);
-        if (normalized_qty <= 0) return error.InvalidQuantity;
+        const info = try self.ensureSymbolInfo(symbol);
+        const norm_qty = try self.normalizeQuantity(symbol, quantity, try self.getMarkPrice(symbol));
+        const client_order_id = try self.generateClientOrderId(symbol, side, position_side, reduce_only);
 
         var query_buf = std.ArrayList(u8).init(self.allocator);
         defer query_buf.deinit();
-        const client_order_id = try self.buildClientOrderId(symbol, side, position_side);
-        defer self.allocator.free(client_order_id);
-
         try query_buf.writer().print(
             "symbol={s}&side={s}&type=MARKET&positionSide={s}&quantity={d:.8}&reduceOnly={s}&newClientOrderId={s}",
             .{
                 symbol,
-                if (side == .buy) "BUY" else "SELL",
-                if (position_side == .long) "LONG" else "SHORT",
-                normalized_qty,
+                switch (side) {
+                    .buy => "BUY",
+                    .sell => "SELL",
+                },
+                switch (position_side) {
+                    .long => "LONG",
+                    .short => "SHORT",
+                },
+                norm_qty,
                 if (reduce_only) "true" else "false",
                 client_order_id,
             },
         );
-
         const body = try self.signedRequest(.POST, "/fapi/v1/order", query_buf.items);
         defer self.allocator.free(body);
-
-        return self.parseOrderResult(body);
+        const result = try self.parseOrderResult(body);
+        self.allocator.free(client_order_id);
+        return result;
     }
 
-    fn buildClientOrderId(
+    fn generateClientOrderId(
         self: *BinanceFuturesClient,
         symbol: []const u8,
         side: OrderSide,
         position_side: PositionSide,
+        reduce_only: bool,
     ) ![]const u8 {
-        var rand_bytes: [6]u8 = undefined;
-        std.crypto.random.bytes(&rand_bytes);
         return try std.fmt.allocPrint(self.allocator, "{s}_{s}_{s}_{s}", .{
             symbol,
-            if (side == .buy) "B" else "S",
-            if (position_side == .long) "L" else "H",
-            std.fmt.fmtSliceHexLower(&rand_bytes),
+            switch (side) {
+                .buy => "BUY",
+                .sell => "SELL",
+            },
+            switch (position_side) {
+                .long => "LONG",
+                .short => "SHORT",
+            },
+            if (reduce_only) "REDUCE" else "OPEN",
         });
     }
 
@@ -214,42 +221,45 @@ pub const BinanceFuturesClient = struct {
         var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, body, .{});
         defer parsed.deinit();
         const root = parsed.value;
-        const obj = root.object;
+        const order_id_val = root.object.get("orderId") orelse return error.ParseError;
+        const client_order_val = root.object.get("clientOrderId") orelse return error.ParseError;
+        const executed_qty_val = root.object.get("executedQty") orelse return error.ParseError;
+        const avg_price_val = root.object.get("avgPrice");
+        const cum_quote_val = root.object.get("cumQuote");
+        const status_val = root.object.get("status");
 
-        const order_id_val = obj.get("orderId") orelse return error.MissingOrderId;
         const order_id: i64 = switch (order_id_val) {
             .integer => |i| @intCast(i),
-            else => return error.MissingOrderId,
+            .string => |s| std.fmt.parseInt(i64, s.string, 10) catch return error.ParseError,
+            else => return error.ParseError,
         };
 
-        const executed_qty_val = obj.get("executedQty") orelse return error.MissingExecutedQty;
         const executed_qty = switch (executed_qty_val) {
-            .string => std.fmt.parseFloat(f64, executed_qty_val.string) catch 0.0,
-            else => 0.0,
+            .string => |s| std.fmt.parseFloat(f64, s.string) catch return error.ParseError,
+            .float => |f| f,
+            else => return error.ParseError,
         };
 
-        const avg_price_val = obj.get("avgPrice") orelse null;
         const avg_price = if (avg_price_val) |val| switch (val) {
-            .string => std.fmt.parseFloat(f64, val.string) catch 0.0,
+            .string => |s| std.fmt.parseFloat(f64, s.string) catch 0.0,
+            .float => |f| f,
             else => 0.0,
         } else 0.0;
 
-        const cum_quote_val = obj.get("cumQuote") orelse null;
         const cum_quote = if (cum_quote_val) |val| switch (val) {
-            .string => std.fmt.parseFloat(f64, val.string) catch 0.0,
+            .string => |s| std.fmt.parseFloat(f64, s.string) catch 0.0,
+            .float => |f| f,
             else => 0.0,
         } else 0.0;
 
-        const client_order_val = obj.get("clientOrderId") orelse return error.MissingClientOrderId;
         const client_order_id = switch (client_order_val) {
-            .string => try self.allocator.dupe(u8, client_order_val.string),
-            else => return error.MissingClientOrderId,
+            .string => |s| try self.allocator.dupe(u8, s.string),
+            else => return error.ParseError,
         };
 
-        const status_val = obj.get("status") orelse null;
         const status = if (status_val) |val| switch (val) {
-            .string => try self.allocator.dupe(u8, val.string),
-            else => try self.allocator.dupe(u8, "UNKNOWN"),
+            .string => |s| try self.allocator.dupe(u8, s.string),
+            else => return error.ParseError,
         } else try self.allocator.dupe(u8, "UNKNOWN");
 
         return OrderResult{
@@ -279,7 +289,9 @@ pub const BinanceFuturesClient = struct {
         }
         const precision_width: usize = @intCast(info.quantity_precision);
         var fmt_buf: [32]u8 = undefined;
-        const slice = try std.fmt.bufPrint(&fmt_buf, "{d:.{d}}", .{ adjusted_qty, precision_width });
+        var fb_stream = std.io.fixedBufferStream(&fmt_buf);
+        try std.fmt.formatFloatDecimal(adjusted_qty, .{ .precision = precision_width }, fb_stream.writer());
+        const slice = fb_stream.getWritten();
         return std.fmt.parseFloat(f64, slice) catch adjusted_qty;
     }
 
@@ -297,58 +309,72 @@ pub const BinanceFuturesClient = struct {
         const uri = try std.Uri.parse(url_buf.items);
         var req = try self.http_client.open(.GET, uri, .{ .server_header_buffer = try self.allocator.alloc(u8, 8192) });
         defer req.deinit();
+
         try req.send();
         try req.wait();
-        if (req.response.status != .ok) return error.ExchangeInfoRequestFailed;
+        if (req.response.status != .ok) return error.ExchangeInfoFailed;
+
         const body = try req.reader().readAllAlloc(self.allocator, 1024 * 1024);
         defer self.allocator.free(body);
 
         var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, body, .{});
         defer parsed.deinit();
         const root = parsed.value;
-        const symbols_val = root.object.get("symbols") orelse return error.SymbolNotFound;
-        if (symbols_val != .array or symbols_val.array.items.len == 0) return error.SymbolNotFound;
-        const sym_obj_val = symbols_val.array.items[0];
-        if (sym_obj_val != .object) return error.SymbolNotFound;
-        const sym_obj = sym_obj_val.object;
+        const symbols = root.object.get("symbols") orelse return error.ExchangeInfoFailed;
+        if (symbols != .array) return error.ExchangeInfoFailed;
 
-        var step_size: f64 = 0.0;
-        var min_qty: f64 = 0.0;
-        var min_notional: f64 = 0.0;
-        var precision: u8 = 3;
+        for (symbols.array.items) |sym| {
+            if (sym != .object) continue;
+            const sym_obj = sym.object;
+            const symbol_val = sym_obj.get("symbol") orelse continue;
+            if (symbol_val != .string) continue;
+            if (!std.mem.eql(u8, symbol_val.string, symbol)) continue;
 
-        if (sym_obj.get("quantityPrecision")) |prec_val| {
-            if (prec_val == .integer) {
-                precision = @intCast(prec_val.integer);
+            var step_size: f64 = 0.0;
+            var min_qty: f64 = 0.0;
+            var min_notional: f64 = 0.0;
+            var precision: u8 = 8;
+
+            if (sym_obj.get("quantityPrecision")) |prec_val| {
+                if (prec_val == .integer) {
+                    precision = @intCast(prec_val.integer);
+                }
             }
-        }
 
-        if (sym_obj.get("filters")) |filters_val| {
-            if (filters_val == .array) {
-                for (filters_val.array.items) |filter| {
-                    if (filter != .object) continue;
-                    const fobj = filter.object;
-                    const filter_type = fobj.get("filterType") orelse continue;
-                    if (filter_type != .string) continue;
-                    if (std.mem.eql(u8, filter_type.string, "LOT_SIZE")) {
-                        if (fobj.get("stepSize")) |step_val| {
-                            if (step_val == .string) step_size = std.fmt.parseFloat(f64, step_val.string) catch step_size;
-                        }
-                        if (fobj.get("minQty")) |min_qty_val| {
-                            if (min_qty_val == .string) min_qty = std.fmt.parseFloat(f64, min_qty_val.string) catch min_qty;
-                        }
-                    } else if (std.mem.eql(u8, filter_type.string, "MIN_NOTIONAL")) {
-                        if (fobj.get("notional")) |notional_val| {
-                            if (notional_val == .string) min_notional = std.fmt.parseFloat(f64, notional_val.string) catch min_notional;
+            if (sym_obj.get("filters")) |filters_val| {
+                if (filters_val == .array) {
+                    for (filters_val.array.items) |filter| {
+                        if (filter != .object) continue;
+                        const fobj = filter.object;
+                        const filter_type = fobj.get("filterType") orelse continue;
+                        if (filter_type != .string) continue;
+                        if (std.mem.eql(u8, filter_type.string, "LOT_SIZE")) {
+                            if (fobj.get("stepSize")) |step_val| {
+                                if (step_val == .string) step_size = std.fmt.parseFloat(f64, step_val.string) catch step_size;
+                            }
+                            if (fobj.get("minQty")) |min_qty_val| {
+                                if (min_qty_val == .string) min_qty = std.fmt.parseFloat(f64, min_qty_val.string) catch min_qty;
+                            }
+                        } else if (std.mem.eql(u8, filter_type.string, "MIN_NOTIONAL")) {
+                            if (fobj.get("notional")) |notional_val| {
+                                if (notional_val == .string) min_notional = std.fmt.parseFloat(f64, notional_val.string) catch min_notional;
+                            }
                         }
                     }
                 }
             }
-        }
 
-        if (step_size == 0.0) step_size = 0.0001;
-        if (min_qty == 0.0) min_qty = step_size;
-        if (min_notional == 0.0) min_notional = 5.0;
+            if (step_size == 0.0) step_size = 0.0001;
+            if (min_qty == 0.0) min_qty = step_size;
+            if (min_notional == 0.0) min_notional = 5.0;
+
+            return SymbolInfo{
+                .step_size = step_size,
+                .min_qty = min_qty,
+                .min_notional = min_notional,
+                .quantity_precision = precision,
+            };
+        }
 
         return SymbolInfo{
             .step_size = step_size,
@@ -398,7 +424,7 @@ pub const BinanceFuturesClient = struct {
 
         var req = try self.http_client.open(method, uri, .{ .server_header_buffer = try self.allocator.alloc(u8, 8192) });
         defer req.deinit();
-        req.headers.appendValue("X-MBX-APIKEY", self.api_key) catch {};
+        req.headers.append(.{ .name = "X-MBX-APIKEY", .value = self.api_key }) catch {};
 
         try req.send();
         try req.wait();
