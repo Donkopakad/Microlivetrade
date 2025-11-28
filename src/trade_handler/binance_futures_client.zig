@@ -411,10 +411,12 @@ pub const BinanceFuturesClient = struct {
         const timestamp: i64 = @intCast(std.time.milliTimestamp());
         var query_buf = std.ArrayList(u8).init(self.allocator);
         defer query_buf.deinit();
+
         if (base_query.len > 0) {
             try query_buf.appendSlice(base_query);
             try query_buf.append('&');
         }
+
         try query_buf.writer().print("timestamp={d}&recvWindow={d}", .{ timestamp, self.recv_window });
 
         var sig_buf: [64]u8 = undefined;
@@ -425,14 +427,13 @@ pub const BinanceFuturesClient = struct {
         try url_buf.writer().print("{s}{s}?{s}&signature={s}", .{ base_url, path, query_buf.items, sig });
         const uri = try std.Uri.parse(url_buf.items);
 
-        var headers = http.Headers.init(self.allocator);
-        defer headers.deinit();
-        try headers.append("X-MBX-APIKEY", self.api_key);
-
+        const extra_headers = [_]http.Header{
+            .{ .name = "X-MBX-APIKEY", .value = self.api_key },
+        };
 
         var req = try self.http_client.open(method, uri, .{
             .server_header_buffer = try self.allocator.alloc(u8, 8192),
-            .headers = &headers,
+            .extra_headers = &extra_headers,
         });
         defer req.deinit();
 
