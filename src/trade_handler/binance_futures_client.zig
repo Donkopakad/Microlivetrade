@@ -35,8 +35,8 @@ pub const BinanceFuturesClient = struct {
     pub const base_url: []const u8 = "https://fapi.binance.com";
 
     pub fn initFromEnv(allocator: std.mem.Allocator) !BinanceFuturesClient {
-        var api_key_opt = std.process.getEnvVarOwned(allocator, "BINANCE_FUTURES_API_KEY") catch null;
-        var api_secret_opt = std.process.getEnvVarOwned(allocator, "BINANCE_FUTURES_API_SECRET") catch null;
+        const api_key_opt = std.process.getEnvVarOwned(allocator, "BINANCE_FUTURES_API_KEY") catch null;
+        const api_secret_opt = std.process.getEnvVarOwned(allocator, "BINANCE_FUTURES_API_SECRET") catch null;
         const recv_window_str = std.process.getEnvVarOwned(allocator, "BINANCE_FUTURES_RECV_WINDOW") catch null;
 
         const recv_window: u64 = if (recv_window_str) |val| blk: {
@@ -150,6 +150,7 @@ pub const BinanceFuturesClient = struct {
         position_side: PositionSide,
         reduce_only: bool,
     ) !OrderResult {
+        _ = leverage; // currently unused, kept for API compatibility
         if (!self.enabled) return error.LiveTradingDisabled;
         const price = try self.getMarkPrice(symbol);
         const qty = usdt_notional / price;
@@ -216,8 +217,8 @@ pub const BinanceFuturesClient = struct {
         const obj = root.object;
 
         const order_id_val = obj.get("orderId") orelse return error.MissingOrderId;
-        const order_id = switch (order_id_val) {
-            .integer => |i| @intCast(i),
+        const order_id: i64 = switch (order_id_val) {
+            .integer => |i| @intCast(i64, i),
             else => return error.MissingOrderId,
         };
 
@@ -317,7 +318,7 @@ pub const BinanceFuturesClient = struct {
         var precision: u8 = 3;
 
         if (sym_obj.get("quantityPrecision")) |prec_val| {
-            if (prec_val == .integer) precision = @intCast(prec_val.integer);
+            if (prec_val == .integer) precision = @intCast(u8, prec_val.integer);
         }
 
         if (sym_obj.get("filters")) |filters_val| {
@@ -420,7 +421,6 @@ pub const BinanceFuturesClient = struct {
     }
 
     fn logBinanceError(self: *BinanceFuturesClient, path: []const u8, body: []const u8) void {
-        _ = self;
         var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, body, .{}) catch |err| {
             std.log.err("Binance request {s} failed with status and unparsable body: {}", .{ path, err });
             return;
