@@ -125,278 +125,98 @@ pub const BinanceFuturesClient = struct {
         defer self.allocator.free(body);
     }
 
-    pub fn openLong(self: *BinanceFuturesClient, symbol: []const u8, usdt_notional: f64, leverage: f64) !OrderResult {
-        return self.placeOrderWithNotional(symbol, usdt_notional, leverage, .buy, .long, false);
-    }
-
-    pub fn openShort(self: *BinanceFuturesClient, symbol: []const u8, usdt_notional: f64, leverage: f64) !OrderResult {
-        return self.placeOrderWithNotional(symbol, usdt_notional, leverage, .sell, .short, false);
-    }
-
-    pub fn closeLong(self: *BinanceFuturesClient, symbol: []const u8, quantity: f64) !OrderResult {
-        return self.placeOrderWithQuantity(symbol, quantity, .sell, .long, true);
-    }
-
-    pub fn closeShort(self: *BinanceFuturesClient, symbol: []const u8, quantity: f64) !OrderResult {
-        return self.placeOrderWithQuantity(symbol, quantity, .buy, .short, true);
-    }
-
-    fn placeOrderWithNotional(
-        self: *BinanceFuturesClient,
-        symbol: []const u8,
-        usdt_notional: f64,
-        leverage: f64,
-        side: OrderSide,
-        position_side: PositionSide,
-        reduce_only: bool,
-    ) !OrderResult {
-        _ = leverage; // currently unused, kept for API compatibility
-        if (!self.enabled) return error.LiveTradingDisabled;
-        const price = try self.getMarkPrice(symbol);
-        const qty = usdt_notional / price;
-        return self.placeOrderWithQuantity(symbol, qty, side, position_side, reduce_only);
-    }
-
-    fn placeOrderWithQuantity(
-        self: *BinanceFuturesClient,
-        symbol: []const u8,
-        quantity: f64,
-        side: OrderSide,
-        position_side: PositionSide,
-        reduce_only: bool,
-    ) !OrderResult {
-        if (!self.enabled) return error.LiveTradingDisabled;
-        _ = try self.ensureSymbolInfo(symbol);
-        const norm_qty = try self.normalizeQuantity(symbol, quantity, try self.getMarkPrice(symbol));
-        const client_order_id = try self.generateClientOrderId(symbol, side, position_side, reduce_only);
+    pub fn ensureSymbolInfo(self: *BinanceFuturesClient, symbol: []const u8) !SymbolInfo {
+        if (self.symbol_info.get(symbol)) |info| return info;
 
         var query_buf = std.ArrayList(u8).init(self.allocator);
         defer query_buf.deinit();
-        try query_buf.writer().print(
-            "symbol={s}&side={s}&type=MARKET&positionSide={s}&quantity={d:.8}&reduceOnly={s}&newClientOrderId={s}",
-            .{
-                symbol,
-                switch (side) {
-                    .buy => "BUY",
-                    .sell => "SELL",
-                },
-                switch (position_side) {
-                    .long => "LONG",
-                    .short => "SHORT",
-                },
-                norm_qty,
-                if (reduce_only) "true" else "false",
-                client_order_id,
-            },
-        );
-        const body = try self.signedRequest(.POST, "/fapi/v1/order", query_buf.items);
-        defer self.allocator.free(body);
-        const result = try self.parseOrderResult(body);
-        self.allocator.free(client_order_id);
-        return result;
-    }
+        try query_buf.writer().print("symbol={s}", .{ symbol });
 
-    fn generateClientOrderId(
-        self: *BinanceFuturesClient,
-        symbol: []const u8,
-        side: OrderSide,
-        position_side: PositionSide,
-        reduce_only: bool,
-    ) ![]const u8 {
-        return try std.fmt.allocPrint(self.allocator, "{s}_{s}_{s}_{s}", .{
-            symbol,
-            switch (side) {
-                .buy => "BUY",
-                .sell => "SELL",
-            },
-            switch (position_side) {
-                .long => "LONG",
-                .short => "SHORT",
-            },
-            if (reduce_only) "REDUCE" else "OPEN",
-        });
-    }
-
-    fn parseOrderResult(self: *BinanceFuturesClient, body: []const u8) !OrderResult {
-        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, body, .{});
-        defer parsed.deinit();
-        const root = parsed.value;
-        const order_id_val = root.object.get("orderId") orelse return error.ParseError;
-        const client_order_val = root.object.get("clientOrderId") orelse return error.ParseError;
-        const executed_qty_val = root.object.get("executedQty") orelse return error.ParseError;
-        const avg_price_val = root.object.get("avgPrice");
-        const cum_quote_val = root.object.get("cumQuote");
-        const status_val = root.object.get("status");
-
-        const order_id: i64 = switch (order_id_val) {
-            .integer => |i| @intCast(i),
-            .string => |s| std.fmt.parseInt(i64, s.string, 10) catch return error.ParseError,
-            else => return error.ParseError,
-        };
-
-        const executed_qty = switch (executed_qty_val) {
-            .string => |s| std.fmt.parseFloat(f64, s.string) catch return error.ParseError,
-            .float => |f| f,
-            else => return error.ParseError,
-        };
-
-        const avg_price = if (avg_price_val) |val| switch (val) {
-            .string => |s| std.fmt.parseFloat(f64, s.string) catch 0.0,
-            .float => |f| f,
-            else => 0.0,
-        } else 0.0;
-
-        const cum_quote = if (cum_quote_val) |val| switch (val) {
-            .string => |s| std.fmt.parseFloat(f64, s.string) catch 0.0,
-            .float => |f| f,
-            else => 0.0,
-        } else 0.0;
-
-        const client_order_id = switch (client_order_val) {
-            .string => |s| try self.allocator.dupe(u8, s.string),
-            else => return error.ParseError,
-        };
-
-        const status = if (status_val) |val| switch (val) {
-            .string => |s| try self.allocator.dupe(u8, s.string),
-            else => return error.ParseError,
-        } else try self.allocator.dupe(u8, "UNKNOWN");
-
-        return OrderResult{
-            .order_id = order_id,
-            .client_order_id = client_order_id,
-            .executed_qty = executed_qty,
-            .avg_price = avg_price,
-            .cum_quote = cum_quote,
-            .status = status,
-        };
-    }
-
-    pub fn freeOrderResult(self: *BinanceFuturesClient, result: OrderResult) void {
-        self.allocator.free(result.client_order_id);
-        self.allocator.free(result.status);
-    }
-
-    fn normalizeQuantity(self: *BinanceFuturesClient, symbol: []const u8, quantity: f64, price: f64) !f64 {
-        const info = try self.ensureSymbolInfo(symbol);
-        const step = info.step_size;
-        if (step <= 0) return error.InvalidStepSize;
-        const floored_steps = std.math.floor(quantity / step);
-        const adjusted_qty = floored_steps * step;
-        if (adjusted_qty <= 0) return error.InvalidQuantity;
-        if ((adjusted_qty * price) < info.min_notional or adjusted_qty < info.min_qty) {
-            return error.QuantityTooSmall;
-        }
-        const precision_width: usize = @intCast(info.quantity_precision);
-        const pow10 = std.math.pow(f64, 10, @floatFromInt(precision_width));
-        const rounded = std.math.floor(adjusted_qty * pow10) / pow10;
-        return rounded;
-    }
-
-    fn ensureSymbolInfo(self: *BinanceFuturesClient, symbol: []const u8) !SymbolInfo {
-        if (self.symbol_info.get(symbol)) |info| return info;
-        const info = try self.fetchSymbolInfo(symbol);
-        try self.symbol_info.put(try self.allocator.dupe(u8, symbol), info);
-        return info;
-    }
-
-    fn fetchSymbolInfo(self: *BinanceFuturesClient, symbol: []const u8) !SymbolInfo {
         var url_buf = std.ArrayList(u8).init(self.allocator);
         defer url_buf.deinit();
-        try url_buf.writer().print("{s}/fapi/v1/exchangeInfo?symbol={s}", .{ base_url, symbol });
+        try url_buf.writer().print("{s}/fapi/v1/exchangeInfo?{s}", .{ base_url, query_buf.items });
         const uri = try std.Uri.parse(url_buf.items);
-        var req = try self.http_client.open(.GET, uri, .{ .server_header_buffer = try self.allocator.alloc(u8, 8192) });
+
+        var req = try self.http_client.request(.GET, uri, .{ .server_header_buffer = try self.allocator.alloc(u8, 4096) });
         defer req.deinit();
 
         try req.send();
         try req.wait();
-        if (req.response.status != .ok) return error.ExchangeInfoFailed;
 
-        const body = try req.reader().readAllAlloc(self.allocator, 1024 * 1024);
+        const body = try req.reader().readAllAlloc(self.allocator, 4096);
         defer self.allocator.free(body);
-
         var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, body, .{});
         defer parsed.deinit();
         const root = parsed.value;
-        const symbols = root.object.get("symbols") orelse return error.ExchangeInfoFailed;
-        if (symbols != .array) return error.ExchangeInfoFailed;
 
-        const default_step_size: f64 = 0.0001;
-        const default_min_qty: f64 = default_step_size;
-        const default_min_notional: f64 = 5.0;
-        const default_precision: u8 = 8;
+        const symbols = root.object.get("symbols") orelse return error.ExchangeInfoParseError;
+        if (symbols != .array) return error.ExchangeInfoParseError;
+        for (symbols.array.items) |sym_info| {
+            if (sym_info != .object) continue;
+            const sym_obj = sym_info.object;
+            const sym_name = sym_obj.get("symbol") orelse continue;
+            if (sym_name != .string) continue;
+            if (!std.mem.eql(u8, sym_name.string, symbol)) continue;
 
-        for (symbols.array.items) |sym| {
-            if (sym != .object) continue;
-            const sym_obj = sym.object;
-            const symbol_val = sym_obj.get("symbol") orelse continue;
-            if (symbol_val != .string) continue;
-            if (!std.mem.eql(u8, symbol_val.string, symbol)) continue;
+            const filters = sym_obj.get("filters") orelse return error.ExchangeInfoParseError;
+            if (filters != .array) return error.ExchangeInfoParseError;
 
-            var step_size: f64 = default_step_size;
-            var min_qty: f64 = default_min_qty;
-            var min_notional: f64 = default_min_notional;
-            var precision: u8 = default_precision;
+            var step_size: f64 = 0.0;
+            var min_qty: f64 = 0.0;
+            var min_notional: f64 = 0.0;
+            var quantity_precision: u8 = 0;
 
-            if (sym_obj.get("quantityPrecision")) |prec_val| {
-                if (prec_val == .integer) {
-                    precision = @intCast(prec_val.integer);
+            for (filters.array.items) |filter| {
+                if (filter != .object) continue;
+                const filter_obj = filter.object;
+                const filter_type_val = filter_obj.get("filterType") orelse continue;
+                if (filter_type_val != .string) continue;
+                if (std.mem.eql(u8, filter_type_val.string, "LOT_SIZE")) {
+                    const step_size_val = filter_obj.get("stepSize") orelse return error.ExchangeInfoParseError;
+                    const min_qty_val = filter_obj.get("minQty") orelse return error.ExchangeInfoParseError;
+                    if (step_size_val != .string or min_qty_val != .string) return error.ExchangeInfoParseError;
+                    step_size = std.fmt.parseFloat(f64, step_size_val.string) catch return error.ExchangeInfoParseError;
+                    min_qty = std.fmt.parseFloat(f64, min_qty_val.string) catch return error.ExchangeInfoParseError;
+                } else if (std.mem.eql(u8, filter_type_val.string, "MIN_NOTIONAL")) {
+                    const notional_val = filter_obj.get("notional") orelse return error.ExchangeInfoParseError;
+                    if (notional_val != .string) return error.ExchangeInfoParseError;
+                    min_notional = std.fmt.parseFloat(f64, notional_val.string) catch return error.ExchangeInfoParseError;
                 }
             }
 
-            if (sym_obj.get("filters")) |filters_val| {
-                if (filters_val == .array) {
-                    for (filters_val.array.items) |filter| {
-                        if (filter != .object) continue;
-                        const fobj = filter.object;
-                        const filter_type = fobj.get("filterType") orelse continue;
-                        if (filter_type != .string) continue;
-                        if (std.mem.eql(u8, filter_type.string, "LOT_SIZE")) {
-                            if (fobj.get("stepSize")) |step_val| {
-                                if (step_val == .string) step_size = std.fmt.parseFloat(f64, step_val.string) catch step_size;
-                            }
-                            if (fobj.get("minQty")) |min_qty_val| {
-                                if (min_qty_val == .string) min_qty = std.fmt.parseFloat(f64, min_qty_val.string) catch min_qty;
-                            }
-                        } else if (std.mem.eql(u8, filter_type.string, "MIN_NOTIONAL")) {
-                            if (fobj.get("notional")) |notional_val| {
-                                if (notional_val == .string) min_notional = std.fmt.parseFloat(f64, notional_val.string) catch min_notional;
-                            }
-                        }
-                    }
-                }
-            }
+            const qty_precision_val = sym_obj.get("quantityPrecision") orelse return error.ExchangeInfoParseError;
+            if (qty_precision_val != .integer) return error.ExchangeInfoParseError;
+            quantity_precision = @intCast(qty_precision_val.integer);
 
-            if (step_size == 0.0) step_size = 0.0001;
-            if (min_qty == 0.0) min_qty = step_size;
-            if (min_notional == 0.0) min_notional = 5.0;
-
-            return SymbolInfo{
+            const info = SymbolInfo{
                 .step_size = step_size,
                 .min_qty = min_qty,
                 .min_notional = min_notional,
-                .quantity_precision = precision,
+                .quantity_precision = quantity_precision,
             };
+            try self.symbol_info.put(try self.allocator.dupe(u8, symbol), info);
+            return info;
         }
 
-        return SymbolInfo{
-            .step_size = default_step_size,
-            .min_qty = default_min_qty,
-            .min_notional = default_min_notional,
-            .quantity_precision = default_precision,
-        };
+        return error.ExchangeInfoParseError;
     }
 
-    fn getMarkPrice(self: *BinanceFuturesClient, symbol: []const u8) !f64 {
+    pub fn getMarkPrice(self: *BinanceFuturesClient, symbol: []const u8) !f64 {
+        var query_buf = std.ArrayList(u8).init(self.allocator);
+        defer query_buf.deinit();
+        try query_buf.writer().print("symbol={s}", .{ symbol });
+
         var url_buf = std.ArrayList(u8).init(self.allocator);
         defer url_buf.deinit();
-        try url_buf.writer().print("{s}/fapi/v1/ticker/price?symbol={s}", .{ base_url, symbol });
+        try url_buf.writer().print("{s}/fapi/v1/premiumIndex?{s}", .{ base_url, query_buf.items });
         const uri = try std.Uri.parse(url_buf.items);
-        var req = try self.http_client.open(.GET, uri, .{ .server_header_buffer = try self.allocator.alloc(u8, 4096) });
+
+        var req = try self.http_client.request(.GET, uri, .{ .server_header_buffer = try self.allocator.alloc(u8, 4096) });
         defer req.deinit();
+
         try req.send();
         try req.wait();
-        if (req.response.status != .ok) return error.PriceRequestFailed;
+
         const body = try req.reader().readAllAlloc(self.allocator, 4096);
         defer self.allocator.free(body);
         var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, body, .{});
@@ -425,9 +245,15 @@ pub const BinanceFuturesClient = struct {
         try url_buf.writer().print("{s}{s}?{s}&signature={s}", .{ base_url, path, query_buf.items, sig });
         const uri = try std.Uri.parse(url_buf.items);
 
-        var req = try self.http_client.open(method, uri, .{ .server_header_buffer = try self.allocator.alloc(u8, 8192) });
+        var headers = http.Headers{ .allocator = self.allocator, .list = .{} };
+        defer headers.deinit();
+        try headers.append("X-MBX-APIKEY", self.api_key);
+
+        var req = try self.http_client.request(method, uri, .{
+            .server_header_buffer = try self.allocator.alloc(u8, 8192),
+            .headers = &headers,
+        });
         defer req.deinit();
-        req.headers.set("X-MBX-APIKEY", self.api_key) catch {};
 
         try req.send();
         try req.wait();
