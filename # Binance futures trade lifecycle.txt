@@ -1,0 +1,122 @@
+# Binance futures trade lifecycle
+
+This document explains how the MicroRush Binance futures module turns the CSV feed
+of 15-minute percentage changes into real trades, how it enforces the ±5 %
+entry rule, and how each position is flattened before the candle that spawned
+it completes.
+
+## 1. CSV feed ➜ trading signals
+
+1. `SignalEngine.generateSignalsFromCsv()` opens `percent_changes_15m.csv` and
+   tails any appended rows. Each row is shaped as:
+   ```text
+timestamp_ms,symbol,open_price,last_price,percent_change
+1729462955000,BTCUSDT,68000.00,71400.00,5.00
+   ```
+2. `handleCsvLine()` parses the symbol (`BTCUSDT`) and the percent change
+   (`5.00`).
+3. `evaluateCsvSignal()` checks the magnitude:
+   * `>= +5.0` → create a `.BUY` `TradingSignal` with `leverage = 1.0`.
+   * `<= -5.0` → create a `.SELL` signal with the same leverage.
+4. Before enqueuing, the signal engine queries `TradeHandler.getPositionSide()`.
+   If the symbol is already long, another `.BUY` is skipped; if it is short,
+   the `.SELL` is skipped. This prevents duplicate entries.
+
+### Example A – bullish print
+CSV row: `...,ETHUSDT,..., +6.2`
+
+* `evaluateCsvSignal()` emits a `.BUY` signal. Its `signal_strength` is derived
+  from the magnitude (`6.2 / 20 = 0.31`), so downstream components can size the
+  position proportionally.
+* The signal’s `timestamp` captures when the CSV line was seen, allowing the
+  portfolio manager to enforce the 15-minute exit rule later.
+
+### Example B – bearish print
+CSV row: `...,SOLUSDT,..., -8.5`
+
+* Because the change is less than or equal to −5 %, the signal type is `.SELL`.
+* If SOLUSDT currently has a long position open, the trade handler will close it
+  before opening the short (see Section 3).
+
+## 2. Trade handler queues and prioritisation
+
+* `TradeHandler.addSignal()` sorts incoming signals into four queues
+  (high/low strength × buy/sell). A strength above `0.9` counts as “high”.
+* `signalThreadFunction()` continuously drains those queues, prioritising
+  high-strength entries first so violent moves are acted on immediately.
+* Every dequeued signal is handed to `PortfolioManager.processSignal()`.
+
+## 3. Opening longs vs. shorts
+
+`PortfolioManager.processSignal()` looks up the latest Binance price via
+`symbol_map.getLastClosePrice()` and then routes the signal to either
+`executeBuy()` or `executeSell()`.
+
+### 3.1 Long workflow
+1. `executeBuy()` checks whether the symbol already has an open position:
+   * If a short exists, `closeShortPosition()` is called first to flatten it.
+   * If a long exists, the function returns (duplicate entry prevention).
+2. Otherwise `openLongPosition()` is invoked:
+   * `calculatePositionSize()` multiplies the base size by the signal strength
+     and caps it between the configured min/max.
+   * Because leverage is fixed at 1×, the USD notional equals the base size.
+   * Fees are subtracted upfront so `current_balance` reflects reserved margin.
+   * A `PortfolioPosition` is stored with the entry timestamp, side `.long`, and
+     leverage metadata.
+
+### 3.2 Short workflow
+`executeSell()` mirrors the buy path:
+1. If a long is open it calls `closeLongPosition()` before returning.
+2. Otherwise `openShortPosition()` reserves margin and records a `.short`
+   position with the same sizing logic.
+
+### Example – short after a bullish trade
+1. 09:00 candle close prints `+5.3 %` on BTCUSDT → `.BUY` signal.
+2. `openLongPosition()` buys BTC using 1× leverage and logs the trade.
+3. 09:07 CSV update shows `-5.8 %` for the same pair. The signal engine notices
+   the position is currently long, so the `.SELL` signal enters the handler.
+4. `executeSell()` calls `closeLongPosition()` (realising the long’s P&L) and
+   does **not** open a short because the existing position consumed the signal.
+   The next CSV print below −5 % will now open the actual short.
+
+## 4. Auto-closing inside the same 15-minute window
+
+`PortfolioManager.checkStopLossConditions()` runs on every loop iteration:
+
+1. Calculates the elapsed time since `entry_timestamp` for every open position.
+2. If `time_elapsed >= max_hold_duration_ns` (15 minutes), the position is
+   scheduled for closure regardless of P&L.
+3. Scheduled closures are executed via synthetic signals:
+   * Longs receive a `.SELL` signal, shorts receive a `.BUY`.
+   * `executeSell()`/`executeBuy()` then run the same bookkeeping code, ensuring
+     balance updates, trade history, and statistics remain consistent.
+
+### Example – 15-minute expiry
+1. 10:00 row pushes `+5.7 %` for XRPUSDT. A long opens at 10:00:05.
+2. No opposite signal appears, so the position remains open.
+3. At 10:15:05 the time limit check fires:
+   * `time_elapsed` ≈ 900 s ≥ `max_hold_duration_ns`.
+   * The manager logs `TIME LIMIT TRIGGERED` and emits a `.SELL` to flatten.
+4. The closing trade re-credits the reserved margin and records realised P&L.
+
+### Example – bearish flip inside 15 minutes
+1. 11:00:02 row shows `−5.4 %` on ADAUSDT → short opens.
+2. 11:09:30 row rebounds to `+5.1 %`:
+   * Signal engine sees the symbol is short and **skips opening a long**.
+   * `TradeHandler` instead closes the short immediately via `executeBuy()`.
+3. If ADA continues above +5 % after the close, the next CSV update will open a
+   brand-new long position.
+
+## 5. Summary checklist
+
+* **Entry trigger:** CSV change ≥ +5 % or ≤ −5 %.
+* **Leverage:** hard-coded to 1× in the emitted `TradingSignal` objects.
+* **Duplicate guard:** the signal engine only emits a long when flat/short and a
+  short when flat/long.
+* **Exit triggers:**
+  1. Opposite signal (handled via `executeBuy`/`executeSell`).
+  2. 15-minute time limit (`max_hold_duration_ns`).
+
+Together these rules guarantee that every trade originates from the CSV feed,
+respects the 5 % thresholds, uses 1× leverage, and exits before the candle that
+produced it completes.

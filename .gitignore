@@ -1,0 +1,9 @@
+.zig-cache/*
+zig-out/*
+
+kernel.o
+simd.o
+
+.vscode
+
+massif.*
