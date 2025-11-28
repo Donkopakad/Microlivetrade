@@ -425,9 +425,15 @@ pub const BinanceFuturesClient = struct {
         try url_buf.writer().print("{s}{s}?{s}&signature={s}", .{ base_url, path, query_buf.items, sig });
         const uri = try std.Uri.parse(url_buf.items);
 
-        var req = try self.http_client.open(method, uri, .{ .server_header_buffer = try self.allocator.alloc(u8, 8192) });
+        var headers = http.Headers{ .allocator = self.allocator, .list = .{} };
+        defer headers.deinit();
+        try headers.append("X-MBX-APIKEY", self.api_key);
+
+        var req = try self.http_client.request(method, uri, .{
+            .server_header_buffer = try self.allocator.alloc(u8, 8192),
+            .headers = &headers,
+        });
         defer req.deinit();
-        req.headers.set("X-MBX-APIKEY", self.api_key) catch {};
 
         try req.send();
         try req.wait();
