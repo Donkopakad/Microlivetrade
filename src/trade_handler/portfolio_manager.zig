@@ -6,6 +6,7 @@ const SymbolMap = symbol_map.SymbolMap;
 const TradingSignal = types.TradingSignal;
 const SignalType = types.SignalType;
 const margin = @import("margin_enforcer.zig");
+const binance = @import("binance_futures_client.zig");
 
 pub const PositionSide = enum {
     none,
@@ -24,11 +25,13 @@ const PortfolioPosition = struct {
     is_open: bool,
     side: PositionSide,
     leverage: f32,
+    order_id: ?i64,
 };
 
 pub const PortfolioManager = struct {
     allocator: std.mem.Allocator,
     symbol_map: *const SymbolMap,
+    binance_client: *binance.BinanceFuturesClient,
 
     balance_usdt: f64,
     fee_rate: f64,
@@ -40,35 +43,54 @@ pub const PortfolioManager = struct {
 
     candle_duration_ns: i128,
 
-    pub fn init(allocator: std.mem.Allocator, sym_map: *const SymbolMap) PortfolioManager {
+    pub fn init(allocator: std.mem.Allocator, sym_map: *const SymbolMap, binance_client: *binance.BinanceFuturesClient) PortfolioManager {
         var logger: ?*trade_log.TradeLogger = null;
         logger = trade_log.TradeLogger.init(allocator) catch |err| {
             std.log.err("Failed to initialize trade logger: {}", .{err});
             return PortfolioManager{
                 .allocator = allocator,
                 .symbol_map = sym_map,
+                .binance_client = binance_client,
                 .balance_usdt = 1000.0,
                 .fee_rate = 0.001,
                 .positions = std.StringHashMap(PortfolioPosition).init(allocator),
-                .margin_enforcer = margin.MarginEnforcer.init(allocator, true),
+                .margin_enforcer = margin.MarginEnforcer.init(allocator, true, binance_client),
                 .trade_logger = null,
                 .candle_duration_ns = 15 * 60 * 1_000_000_000,
             };
         };
 
+        var starting_balance: f64 = 1000.0;
+        if (binance_client.isLive()) {
+            binance_client.fetchUsdtBalance() catch |err| {
+                std.log.err("Failed to fetch USDT balance from Binance: {}", .{err});
+            } else |balance_opt| {
+                if (balance_opt) |balance| {
+                    starting_balance = balance;
+                    std.log.info("Initialized live balance from Binance: ${d:.2} USDT", .{balance});
+                } else {
+                    std.log.warn("Binance balance unavailable, defaulting to simulated balance ${d:.2}", .{starting_balance});
+                }
+            }
+        } else {
+            std.log.err("Binance futures credentials missing, running in dry-run mode for order placement", .{});
+        }
+
         return PortfolioManager{
             .allocator = allocator,
             .symbol_map = sym_map,
-            .balance_usdt = 1000.0,
+            .binance_client = binance_client,
+            .balance_usdt = starting_balance,
             .fee_rate = 0.001,
             .positions = std.StringHashMap(PortfolioPosition).init(allocator),
-            .margin_enforcer = margin.MarginEnforcer.init(allocator, true),
+            .margin_enforcer = margin.MarginEnforcer.init(allocator, true, binance_client),
             .trade_logger = logger,
             .candle_duration_ns = 15 * 60 * 1_000_000_000,
         };
     }
 
     pub fn deinit(self: *PortfolioManager) void {
+        self.cleanupPositions();
         if (self.trade_logger) |logger| {
             logger.deinit();
             self.allocator.destroy(logger);
@@ -122,7 +144,9 @@ pub const PortfolioManager = struct {
             if (pos.is_open and pos.side == .short) {
                 self.closeShort(pos, price);
             }
-            return;
+            if (pos.is_open and pos.side == .long) {
+                return;
+            }
         }
 
         self.openPosition(signal, price, .long);
@@ -138,7 +162,9 @@ pub const PortfolioManager = struct {
             if (pos.is_open and pos.side == .long) {
                 self.closeLong(pos, price);
             }
-            return;
+            if (pos.is_open and pos.side == .short) {
+                return;
+            }
         }
 
         self.openPosition(signal, price, .short);
@@ -146,8 +172,9 @@ pub const PortfolioManager = struct {
 
     fn openPosition(self: *PortfolioManager, signal: TradingSignal, price: f64, side: PositionSide) void {
         const leverage = if (signal.leverage > 0) signal.leverage else 1.0;
-        const position_size_usdt = @as(f64, @floatCast(@max(10.0, self.balance_usdt * 0.05))) * @as(f64, @floatCast(leverage));
-        if (self.balance_usdt < position_size_usdt) {
+        const base_notional = @as(f64, @floatCast(@max(10.0, self.balance_usdt * 0.05)));
+        const position_size_usdt = base_notional * @as(f64, @floatCast(leverage));
+        if (self.balance_usdt < position_size_usdt and !self.binance_client.isLive()) {
             std.log.warn(
                 "Insufficient balance to open {s} {s}",
                 .{ (if (side == .long) "LONG" else "SHORT"), signal.symbol_name },
@@ -155,21 +182,73 @@ pub const PortfolioManager = struct {
             return;
         }
 
-        const amount = position_size_usdt / (price * (1.0 + self.fee_rate));
         const candle_start_ns = self.currentCandleStart(signal.symbol_name, signal.timestamp);
         const candle_end_ns = candle_start_ns + self.candle_duration_ns;
 
+        if (self.binance_client.isLive()) {
+            if (side == .long) {
+                self.binance_client.setLeverage(signal.symbol_name, @intFromFloat(leverage)) catch {};
+                const order = self.binance_client.openLong(signal.symbol_name, position_size_usdt, leverage) catch |err| {
+                    std.log.err("Failed to open LONG {s} on Binance: {}", .{ signal.symbol_name, err });
+                    return;
+                };
+                defer self.binance_client.freeOrderResult(order);
+                const amount = if (order.executed_qty > 0) order.executed_qty else position_size_usdt / price;
+                const entry_price = if (order.avg_price > 0) order.avg_price else price;
+                const actual_notional = if (order.cum_quote > 0) order.cum_quote else position_size_usdt;
+                self.recordPosition(signal, side, amount, entry_price, candle_start_ns, candle_end_ns, actual_notional, order.order_id);
+                std.log.info("Opened LONG on Binance {s} orderId={} qty={d:.6} price=${d:.4}", .{ signal.symbol_name, order.order_id, amount, entry_price });
+                return;
+            } else {
+                self.binance_client.setLeverage(signal.symbol_name, @intFromFloat(leverage)) catch {};
+                const order = self.binance_client.openShort(signal.symbol_name, position_size_usdt, leverage) catch |err| {
+                    std.log.err("Failed to open SHORT {s} on Binance: {}", .{ signal.symbol_name, err });
+                    return;
+                };
+                defer self.binance_client.freeOrderResult(order);
+                const amount = if (order.executed_qty > 0) order.executed_qty else position_size_usdt / price;
+                const entry_price = if (order.avg_price > 0) order.avg_price else price;
+                const actual_notional = if (order.cum_quote > 0) order.cum_quote else position_size_usdt;
+                self.recordPosition(signal, side, amount, entry_price, candle_start_ns, candle_end_ns, actual_notional, order.order_id);
+                std.log.info("Opened SHORT on Binance {s} orderId={} qty={d:.6} price=${d:.4}", .{ signal.symbol_name, order.order_id, amount, entry_price });
+                return;
+            }
+        }
+
+        const amount = position_size_usdt / (price * (1.0 + self.fee_rate));
+        self.recordPosition(signal, side, amount, price, candle_start_ns, candle_end_ns, position_size_usdt, null);
+        std.log.info("Opened {s} on {s} at ${d:.4} size ${d:.2} candle_end={d}", .{
+            if (side == .long) "LONG" else "SHORT",
+            signal.symbol_name,
+            price,
+            position_size_usdt,
+            candle_end_ns,
+        });
+    }
+
+    fn recordPosition(
+        self: *PortfolioManager,
+        signal: TradingSignal,
+        side: PositionSide,
+        amount: f64,
+        entry_price: f64,
+        candle_start_ns: i128,
+        candle_end_ns: i128,
+        position_size_usdt: f64,
+        order_id: ?i64,
+    ) void {
         const position = PortfolioPosition{
             .symbol = signal.symbol_name,
             .amount = amount,
-            .avg_entry_price = price,
+            .avg_entry_price = entry_price,
             .entry_timestamp = signal.timestamp,
             .candle_start_timestamp = candle_start_ns,
             .candle_end_timestamp = candle_end_ns,
             .position_size_usdt = position_size_usdt,
             .is_open = true,
             .side = side,
-            .leverage = leverage,
+            .leverage = if (signal.leverage > 0) signal.leverage else 1.0,
+            .order_id = order_id,
         };
 
         self.positions.put(signal.symbol_name, position) catch |err| {
@@ -178,17 +257,10 @@ pub const PortfolioManager = struct {
         };
 
         self.balance_usdt -= position_size_usdt;
-        std.log.info("Opened {s} on {s} at ${d:.4} size ${d:.2} candle_end={d}", .{
-            if (side == .long) "LONG" else "SHORT",
-            signal.symbol_name,
-            price,
-            position_size_usdt,
-            candle_end_ns,
-        });
 
-        const candle_snapshot = self.getCandleSnapshot(signal.symbol_name, price);
+        const candle_snapshot = self.getCandleSnapshot(signal.symbol_name, entry_price);
         const pct_change_from_open_at_entry = if (candle_snapshot.open != 0.0)
-            ((price - candle_snapshot.open) / candle_snapshot.open) * 100.0
+            ((entry_price - candle_snapshot.open) / candle_snapshot.open) * 100.0
         else
             0.0;
 
@@ -197,17 +269,17 @@ pub const PortfolioManager = struct {
                 signal.timestamp,
                 signal.symbol_name,
                 if (side == .long) "LONG" else "SHORT",
-                leverage,
+                position.leverage,
                 amount,
                 position_size_usdt,
                 self.fee_rate,
-                price,
+                entry_price,
                 candle_start_ns,
                 candle_end_ns,
                 candle_snapshot.open,
                 candle_snapshot.high,
                 candle_snapshot.low,
-                price,
+                entry_price,
                 pct_change_from_open_at_entry,
             ) catch |err| {
                 std.log.err("Failed to log open trade: {}", .{err});
@@ -216,7 +288,23 @@ pub const PortfolioManager = struct {
     }
 
     fn closeLong(self: *PortfolioManager, position: *PortfolioPosition, price: f64) void {
-        const trade_volume = position.amount * price;
+        var close_price = price;
+        var executed_qty = position.amount;
+        if (self.binance_client.isLive()) {
+            const order = self.binance_client.closeLong(position.symbol, position.amount) catch |err| {
+                std.log.err("Failed to close LONG {s} on Binance: {}", .{ position.symbol, err });
+                return;
+            };
+            defer self.binance_client.freeOrderResult(order);
+            if (order.executed_qty > 0) executed_qty = order.executed_qty;
+            if (order.avg_price > 0) close_price = order.avg_price;
+            if (order.cum_quote > 0) {
+                // Adjust notional for accurate balance tracking
+                position.position_size_usdt = order.cum_quote;
+            }
+        }
+
+        const trade_volume = executed_qty * close_price;
         const fee = trade_volume * self.fee_rate;
         const net = trade_volume - fee;
         const pnl = net - position.position_size_usdt;
@@ -225,15 +313,15 @@ pub const PortfolioManager = struct {
         position.side = .none;
         self.balance_usdt += net;
 
-        std.log.info("Closed LONG {s} at ${d:.4} pnl ${d:.4}", .{ position.symbol, price, pnl });
+        std.log.info("Closed LONG {s} at ${d:.4} pnl ${d:.4}", .{ position.symbol, close_price, pnl });
 
-        const candle_snapshot = self.getCandleSnapshot(position.symbol, price);
+        const candle_snapshot = self.getCandleSnapshot(position.symbol, close_price);
         const pct_change_from_open_at_entry = if (candle_snapshot.open != 0.0)
             ((position.avg_entry_price - candle_snapshot.open) / candle_snapshot.open) * 100.0
         else
             0.0;
         const pct_change_from_open_at_exit = if (candle_snapshot.open != 0.0)
-            ((price - candle_snapshot.open) / candle_snapshot.open) * 100.0
+            ((close_price - candle_snapshot.open) / candle_snapshot.open) * 100.0
         else
             0.0;
 
@@ -243,17 +331,17 @@ pub const PortfolioManager = struct {
                 position.symbol,
                 "LONG",
                 position.leverage,
-                position.amount,
+                executed_qty,
                 position.position_size_usdt,
                 self.fee_rate,
                 position.avg_entry_price,
-                price,
+                close_price,
                 position.candle_start_timestamp,
                 position.candle_end_timestamp,
                 candle_snapshot.open,
                 candle_snapshot.high,
                 candle_snapshot.low,
-                price,
+                close_price,
                 pnl,
                 pct_change_from_open_at_entry,
                 pct_change_from_open_at_exit,
@@ -264,7 +352,22 @@ pub const PortfolioManager = struct {
     }
 
     fn closeShort(self: *PortfolioManager, position: *PortfolioPosition, price: f64) void {
-        const cover_cost = position.amount * price;
+        var close_price = price;
+        var executed_qty = position.amount;
+        if (self.binance_client.isLive()) {
+            const order = self.binance_client.closeShort(position.symbol, position.amount) catch |err| {
+                std.log.err("Failed to close SHORT {s} on Binance: {}", .{ position.symbol, err });
+                return;
+            };
+            defer self.binance_client.freeOrderResult(order);
+            if (order.executed_qty > 0) executed_qty = order.executed_qty;
+            if (order.avg_price > 0) close_price = order.avg_price;
+            if (order.cum_quote > 0) {
+                position.position_size_usdt = order.cum_quote;
+            }
+        }
+
+        const cover_cost = executed_qty * close_price;
         const fee = cover_cost * self.fee_rate;
         const total = cover_cost + fee;
         const pnl = position.position_size_usdt - total;
@@ -273,15 +376,15 @@ pub const PortfolioManager = struct {
         position.side = .none;
         self.balance_usdt += position.position_size_usdt + pnl;
 
-        std.log.info("Closed SHORT {s} at ${d:.4} pnl ${d:.4}", .{ position.symbol, price, pnl });
+        std.log.info("Closed SHORT {s} at ${d:.4} pnl ${d:.4}", .{ position.symbol, close_price, pnl });
 
-        const candle_snapshot = self.getCandleSnapshot(position.symbol, price);
+        const candle_snapshot = self.getCandleSnapshot(position.symbol, close_price);
         const pct_change_from_open_at_entry = if (candle_snapshot.open != 0.0)
             ((position.avg_entry_price - candle_snapshot.open) / candle_snapshot.open) * 100.0
         else
             0.0;
         const pct_change_from_open_at_exit = if (candle_snapshot.open != 0.0)
-            ((price - candle_snapshot.open) / candle_snapshot.open) * 100.0
+            ((close_price - candle_snapshot.open) / candle_snapshot.open) * 100.0
         else
             0.0;
 
@@ -291,17 +394,17 @@ pub const PortfolioManager = struct {
                 position.symbol,
                 "SHORT",
                 position.leverage,
-                position.amount,
+                executed_qty,
                 position.position_size_usdt,
                 self.fee_rate,
                 position.avg_entry_price,
-                price,
+                close_price,
                 position.candle_start_timestamp,
                 position.candle_end_timestamp,
                 candle_snapshot.open,
                 candle_snapshot.high,
                 candle_snapshot.low,
-                price,
+                close_price,
                 pnl,
                 pct_change_from_open_at_entry,
                 pct_change_from_open_at_exit,
@@ -366,5 +469,12 @@ pub const PortfolioManager = struct {
             .low = low_price,
             .close = close_price,
         };
+    }
+
+    fn cleanupPositions(self: *PortfolioManager) void {
+        var it = self.positions.iterator();
+        while (it.next()) |entry| {
+            _ = entry;
+        }
     }
 };
