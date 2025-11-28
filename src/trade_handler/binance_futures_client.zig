@@ -230,35 +230,35 @@ pub const BinanceFuturesClient = struct {
 
         const order_id: i64 = switch (order_id_val) {
             .integer => |i| @intCast(i),
-            .string => |s| std.fmt.parseInt(i64, s.string, 10) catch return error.ParseError,
+            .string => |s| std.fmt.parseInt(i64, s, 10) catch return error.ParseError,
             else => return error.ParseError,
         };
 
         const executed_qty = switch (executed_qty_val) {
-            .string => |s| std.fmt.parseFloat(f64, s.string) catch return error.ParseError,
+            .string => |s| std.fmt.parseFloat(f64, s) catch return error.ParseError,
             .float => |f| f,
             else => return error.ParseError,
         };
 
         const avg_price = if (avg_price_val) |val| switch (val) {
-            .string => |s| std.fmt.parseFloat(f64, s.string) catch 0.0,
+            .string => |s| std.fmt.parseFloat(f64, s) catch 0.0,
             .float => |f| f,
             else => 0.0,
         } else 0.0;
 
         const cum_quote = if (cum_quote_val) |val| switch (val) {
-            .string => |s| std.fmt.parseFloat(f64, s.string) catch 0.0,
+            .string => |s| std.fmt.parseFloat(f64, s) catch 0.0,
             .float => |f| f,
             else => 0.0,
         } else 0.0;
 
         const client_order_id = switch (client_order_val) {
-            .string => |s| try self.allocator.dupe(u8, s.string),
+            .string => |s| try self.allocator.dupe(u8, s),
             else => return error.ParseError,
         };
 
         const status = if (status_val) |val| switch (val) {
-            .string => |s| try self.allocator.dupe(u8, s.string),
+            .string => |s| try self.allocator.dupe(u8, s),
             else => return error.ParseError,
         } else try self.allocator.dupe(u8, "UNKNOWN");
 
