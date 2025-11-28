@@ -1,10 +1,7 @@
 const DataAggregator = @import("data_aggregator/lib.zig").DataAggregator;
 const SignalEngine = @import("signal_engine/lib.zig").SignalEngine;
-const symbol_map = @import("symbol-map.zig");
-const SymbolMap = symbol_map.SymbolMap;
 const std = @import("std");
-const types = @import("types.zig");
-const Symbol = types.Symbol;
+const binance = @import("trade_handler/binance_futures_client.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -22,11 +19,18 @@ pub fn main() !void {
         }
     }
 
+    var futures_client = try allocator.create(binance.BinanceFuturesClient);
+    futures_client.* = try binance.BinanceFuturesClient.initFromEnv(allocator);
+    defer {
+        futures_client.deinit();
+        allocator.destroy(futures_client);
+    }
+
     const smp_allocator = std.heap.smp_allocator;
     var aggregator = try DataAggregator.init(enable_metrics, smp_allocator);
     defer aggregator.deinit();
 
-    var signal_engine = try SignalEngine.init(smp_allocator, aggregator.symbol_map);
+    var signal_engine = try SignalEngine.init(smp_allocator, aggregator.symbol_map, futures_client);
     defer signal_engine.deinit();
 
     try aggregator.connectToBinance();
