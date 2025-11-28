@@ -10,12 +10,14 @@ const SignalType = types.SignalType;
 const TradeHandler = @import("../trade_handler/lib.zig").TradeHandler;
 const BatchThread = @import("batch_thread.zig").BatchThread;
 const engine_types = @import("types.zig");
+const binance = @import("../trade_handler/binance_futures_client.zig");
 
 pub const SignalEngine = struct {
     allocator: std.mem.Allocator,
     symbol_map: *const SymbolMap,
     stat_calc: *StatCalc,
     trade_handler: TradeHandler,
+    binance_client: *binance.BinanceFuturesClient,
 
     run_flag: std.atomic.Value(bool),
     processing_thread: ?std.Thread,
@@ -25,20 +27,21 @@ pub const SignalEngine = struct {
     batch_mutex: std.Thread.Mutex,
     batch_condition: std.Thread.Condition,
 
-    pub fn init(allocator: std.mem.Allocator, symbol_map: *const SymbolMap) !SignalEngine {
+    pub fn init(allocator: std.mem.Allocator, symbol_map: *const SymbolMap, binance_client: *binance.BinanceFuturesClient) !SignalEngine {
         const device_id = try stat_calc_lib.selectBestCUDADevice();
         var stat_calc = try allocator.create(StatCalc);
         stat_calc.* = try StatCalc.init(allocator, device_id);
         try stat_calc.getDeviceInfo();
         try stat_calc.warmUp();
 
-        const trade_handler = TradeHandler.init(allocator, symbol_map);
+        const trade_handler = TradeHandler.init(allocator, symbol_map, binance_client);
 
         return SignalEngine{
             .allocator = allocator,
             .symbol_map = symbol_map,
             .stat_calc = stat_calc,
             .trade_handler = trade_handler,
+            .binance_client = binance_client,
             .run_flag = std.atomic.Value(bool).init(true),
             .processing_thread = null,
             .batch_thread = null,
