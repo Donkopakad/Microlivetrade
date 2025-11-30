@@ -223,7 +223,7 @@ pub const PortfolioManager = struct {
         }
     }
 
-    fn recordPosition(
+        fn recordPosition(
         self: *PortfolioManager,
         signal: TradingSignal,
         side: PositionSide,
@@ -234,9 +234,12 @@ pub const PortfolioManager = struct {
         position_size_usdt: f64,
         order_id: ?i64,
     ) void {
-        if (!self.positions.contains(signal.symbol_name)) {
-            self.positions.put(self.symbol_map.getKey(signal.symbol_name), PortfolioPosition{
-                .symbol = self.symbol_map.getKey(signal.symbol_name),
+        // Get a non-optional key slice for the hash map
+        const key = self.symbol_map.getKey(signal.symbol_name) orelse signal.symbol_name;
+
+        if (!self.positions.contains(key)) {
+            self.positions.put(key, PortfolioPosition{
+                .symbol = key,
                 .amount = 0.0,
                 .avg_entry_price = 0.0,
                 .entry_timestamp = 0,
@@ -250,8 +253,8 @@ pub const PortfolioManager = struct {
             }) catch unreachable;
         }
 
-        var pos = self.positions.getPtr(signal.symbol_name).?;
-        pos.symbol = self.symbol_map.getKey(signal.symbol_name);
+        var pos = self.positions.getPtr(key).?;
+        pos.symbol = key;
         pos.amount = amount;
         pos.avg_entry_price = entry_price;
         pos.entry_timestamp = signal.timestamp;
