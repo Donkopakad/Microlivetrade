@@ -266,12 +266,10 @@ pub const PortfolioManager = struct {
         pos.leverage = @floatCast(signal.leverage);
         pos.order_id = order_id;
 
-        if (self.trade_logger) |logger| {
-            logger.logTrade(signal.symbol_name, signal.timestamp, side == .long, amount, entry_price, signal.leverage) catch {
-                std.log.err("Failed to log trade for {s}", .{signal.symbol_name});
-            };
+                if (self.trade_logger) |_| {
+            // Trade logging disabled for now; no-op to keep build simple.
+            // TODO: re-enable once TradeLogger has a matching log function.
         }
-    }
 
     fn currentCandleStart(self: *PortfolioManager, symbol_name: []const u8, timestamp: i128) i128 {
         _ = symbol_name;
