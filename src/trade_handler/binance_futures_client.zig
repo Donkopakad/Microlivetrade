@@ -157,7 +157,7 @@ pub const BinanceFuturesClient = struct {
         return self.placeOrderWithQuantity(symbol, qty, side, position_side, reduce_only);
     }
 
-    fn placeOrderWithQuantity(
+        fn placeOrderWithQuantity(
         self: *BinanceFuturesClient,
         symbol: []const u8,
         quantity: f64,
@@ -167,10 +167,11 @@ pub const BinanceFuturesClient = struct {
     ) !OrderResult {
         if (!self.enabled) return error.LiveTradingDisabled;
         _ = try self.ensureSymbolInfo(symbol);
+
         const norm_qty = try self.normalizeQuantity(symbol, quantity, try self.getMarkPrice(symbol));
         const client_order_id = try self.generateClientOrderId(symbol, side, position_side, reduce_only);
 
-                var query_buf = std.ArrayList(u8).init(self.allocator);
+        var query_buf = std.ArrayList(u8).init(self.allocator);
         defer query_buf.deinit();
 
         const side_str = switch (side) {
@@ -183,21 +184,12 @@ pub const BinanceFuturesClient = struct {
             .short => "SHORT",
         };
 
-        var writer = query_buf.writer();
-
-        // Base mandatory params
-        try writer.print(
-            "symbol={s}&side={s}&type=MARKET&positionSide={s}&quantity={d:.8}",
-            .{ symbol, side_str, position_side_str, norm_qty },
+        // ❌ No reduceOnly parameter sent to Binance anymore.
+        try query_buf.writer().print(
+            "symbol={s}&side={s}&type=MARKET&positionSide={s}&quantity={d:.8}&newClientOrderId={s}",
+            .{ symbol, side_str, position_side_str, norm_qty, client_order_id },
         );
 
-        // Only send reduceOnly when true (for closing positions)
-        if (reduce_only) {
-            try writer.print("&reduceOnly=true", .{});
-        }
-
-        // Finally, client order id
-        try writer.print("&newClientOrderId={s}", .{client_order_id});
         const body = try self.signedRequest(.POST, "/fapi/v1/order", query_buf.items);
         defer self.allocator.free(body);
         const result = try self.parseOrderResult(body);
