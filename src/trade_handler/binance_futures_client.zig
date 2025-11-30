@@ -170,25 +170,34 @@ pub const BinanceFuturesClient = struct {
         const norm_qty = try self.normalizeQuantity(symbol, quantity, try self.getMarkPrice(symbol));
         const client_order_id = try self.generateClientOrderId(symbol, side, position_side, reduce_only);
 
-        var query_buf = std.ArrayList(u8).init(self.allocator);
+                var query_buf = std.ArrayList(u8).init(self.allocator);
         defer query_buf.deinit();
-        try query_buf.writer().print(
-            "symbol={s}&side={s}&type=MARKET&positionSide={s}&quantity={d:.8}&reduceOnly={s}&newClientOrderId={s}",
-            .{
-                symbol,
-                switch (side) {
-                    .buy => "BUY",
-                    .sell => "SELL",
-                },
-                switch (position_side) {
-                    .long => "LONG",
-                    .short => "SHORT",
-                },
-                norm_qty,
-                if (reduce_only) "true" else "false",
-                client_order_id,
-            },
+
+        const side_str = switch (side) {
+            .buy => "BUY",
+            .sell => "SELL",
+        };
+
+        const position_side_str = switch (position_side) {
+            .long => "LONG",
+            .short => "SHORT",
+        };
+
+        var writer = query_buf.writer();
+
+        // Base mandatory params
+        try writer.print(
+            "symbol={s}&side={s}&type=MARKET&positionSide={s}&quantity={d:.8}",
+            .{ symbol, side_str, position_side_str, norm_qty },
         );
+
+        // Only send reduceOnly when true (for closing positions)
+        if (reduce_only) {
+            try writer.print("&reduceOnly=true", .{});
+        }
+
+        // Finally, client order id
+        try writer.print("&newClientOrderId={s}", .{client_order_id});
         const body = try self.signedRequest(.POST, "/fapi/v1/order", query_buf.items);
         defer self.allocator.free(body);
         const result = try self.parseOrderResult(body);
