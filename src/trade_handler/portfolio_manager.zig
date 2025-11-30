@@ -223,7 +223,7 @@ pub const PortfolioManager = struct {
         }
     }
 
-        fn recordPosition(
+    fn recordPosition(
         self: *PortfolioManager,
         signal: TradingSignal,
         side: PositionSide,
@@ -234,12 +234,10 @@ pub const PortfolioManager = struct {
         position_size_usdt: f64,
         order_id: ?i64,
     ) void {
-        // Get a non-optional key slice for the hash map
-        const key = self.symbol_map.getKey(signal.symbol_name) orelse signal.symbol_name;
-
-        if (!self.positions.contains(key)) {
-            self.positions.put(key, PortfolioPosition{
-                .symbol = key,
+        // Use symbol_name directly as the hash-map key (no optional issues).
+        if (!self.positions.contains(signal.symbol_name)) {
+            self.positions.put(signal.symbol_name, PortfolioPosition{
+                .symbol = signal.symbol_name,
                 .amount = 0.0,
                 .avg_entry_price = 0.0,
                 .entry_timestamp = 0,
@@ -253,8 +251,8 @@ pub const PortfolioManager = struct {
             }) catch unreachable;
         }
 
-        var pos = self.positions.getPtr(key).?;
-        pos.symbol = key;
+        var pos = self.positions.getPtr(signal.symbol_name).?;
+        pos.symbol = signal.symbol_name;
         pos.amount = amount;
         pos.avg_entry_price = entry_price;
         pos.entry_timestamp = signal.timestamp;
@@ -266,10 +264,11 @@ pub const PortfolioManager = struct {
         pos.leverage = @floatCast(signal.leverage);
         pos.order_id = order_id;
 
-                if (self.trade_logger) |_| {
-            // Trade logging disabled for now; no-op to keep build simple.
+        if (self.trade_logger) |_| {
+            // Trade logging temporarily disabled to avoid mismatches with TradeLogger API.
             // TODO: re-enable once TradeLogger has a matching log function.
         }
+    }
 
     fn currentCandleStart(self: *PortfolioManager, symbol_name: []const u8, timestamp: i128) i128 {
         _ = symbol_name;
