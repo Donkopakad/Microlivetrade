@@ -14,6 +14,10 @@ pub const PositionSide = enum {
     short,
 };
 
+// ✅ Fixed config: each trade uses 125 USDT notional with 5x leverage
+const TRADE_NOTIONAL_USDT: f64 = 125.0; // position size per trade
+const TRADE_LEVERAGE: f64 = 5.0;        // 5x leverage
+
 const PortfolioPosition = struct {
     symbol: []const u8,
     amount: f64,
@@ -176,10 +180,15 @@ pub const PortfolioManager = struct {
     }
 
     fn openPosition(self: *PortfolioManager, signal: TradingSignal, price: f64, side: PositionSide) void {
-        const leverage = if (signal.leverage > 0) signal.leverage else 1.0;
-        const base_notional = @as(f64, @floatCast(@max(10.0, self.balance_usdt * 0.05)));
-        const position_size_usdt = base_notional * @as(f64, @floatCast(leverage));
-        if (self.balance_usdt < position_size_usdt and !self.binance_client.isLive()) {
+        // ✅ Fixed leverage & notional
+        const leverage: f64 = TRADE_LEVERAGE;              // 5x
+        const position_size_usdt: f64 = TRADE_NOTIONAL_USDT; // 125 USDT position
+
+        // Margin needed ≈ notional / leverage (≈ 25 USDT)
+        const required_margin = position_size_usdt / leverage;
+
+        // In dry-run we enforce this check; in live trading Binance itself will reject if insufficient
+        if (self.balance_usdt < required_margin and !self.binance_client.isLive()) {
             std.log.warn(
                 "Insufficient balance to open {s} {s}",
                 .{ (if (side == .long) "LONG" else "SHORT"), signal.symbol_name },
@@ -261,7 +270,7 @@ pub const PortfolioManager = struct {
         pos.position_size_usdt = position_size_usdt;
         pos.is_open = true;
         pos.side = side;
-        pos.leverage = @floatCast(signal.leverage);
+        pos.leverage = @floatCast(signal.leverage); // kept as-is; just for record
         pos.order_id = order_id;
 
         if (self.trade_logger) |_| {
