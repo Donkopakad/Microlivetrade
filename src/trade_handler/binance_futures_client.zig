@@ -278,19 +278,33 @@ pub const BinanceFuturesClient = struct {
         self.allocator.free(result.status);
     }
 
-    fn normalizeQuantity(self: *BinanceFuturesClient, symbol: []const u8, quantity: f64, price: f64) !f64 {
+        fn normalizeQuantity(self: *BinanceFuturesClient, symbol: []const u8, quantity: f64, price: f64) !f64 {
         const info = try self.ensureSymbolInfo(symbol);
         const step = info.step_size;
         if (step <= 0) return error.InvalidStepSize;
-        const floored_steps = std.math.floor(quantity / step);
-        const adjusted_qty = floored_steps * step;
+
+        // ---- FIX: more robust step rounding ----
+        // Work in "number of steps" space and add a tiny epsilon so that
+        // 12.9 / 0.1 = 128.999999... still becomes 129, not 128.
+        const steps_raw = quantity / step;
+        const eps = 1e-9;
+        const steps = std.math.floor(steps_raw + eps);
+
+        const adjusted_qty = steps * step;
+        // ----------------------------------------
+
         if (adjusted_qty <= 0) return error.InvalidQuantity;
         if ((adjusted_qty * price) < info.min_notional or adjusted_qty < info.min_qty) {
             return error.QuantityTooSmall;
         }
+
         const precision_width: usize = @intCast(info.quantity_precision);
         const pow10 = std.math.pow(f64, 10, @floatFromInt(precision_width));
-        const rounded = std.math.floor(adjusted_qty * pow10) / pow10;
+
+        // Round to the symbol's precision (not just floor) – adjusted_qty is already
+        // an exact multiple of step, so this won't overshoot.
+        const rounded = std.math.round(adjusted_qty * pow10) / pow10;
+
         return rounded;
     }
 
