@@ -22,7 +22,7 @@ pub const Position = struct {
     signal_strength: f32,
 };
 
-pub const MAX_SYMBOLS_CUDA = 500;
+pub const MAX_SYMBOLS_CUDA = 600;
 pub const MAX_SYMBOLS = MAX_SYMBOLS_CUDA;
 pub const MAX_RSI_VALUES_PER_SYMBOL = 15;
 
