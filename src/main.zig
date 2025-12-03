@@ -33,7 +33,10 @@ pub fn main() !void {
     var signal_engine = try SignalEngine.init(smp_allocator, aggregator.symbol_map, futures_client);
     defer signal_engine.deinit();
 
-    try aggregator.connectToBinance();
+    aggregator.connectToBinance() catch |err| {
+        std.log.err("Failed to connect to Binance or load symbols; aborting startup: {}", .{err});
+        return;
+    };
     try aggregator.run();
 
     std.debug.print("WebSockets flowing, starting continuous Signal Engine and Trading...\n", .{});
