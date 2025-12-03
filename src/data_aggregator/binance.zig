@@ -19,6 +19,12 @@ const PING_API = "/fapi/v1/ping";
 const EXCHANGE_INFO_API = "/fapi/v1/exchangeInfo";
 const TIME_API = "/fapi/v1/time";
 
+const PingResult = struct {
+    endpoint: []const u8,
+    latency_ms: u64 = 0,
+    ok: bool = false,
+};
+
 pub const Client = struct {
     selected_endpoint: []const u8,
     http_client: http.Client,
@@ -62,11 +68,23 @@ pub const Client = struct {
         try req.wait();
 
         if (req.response.status != .ok) {
+            std.log.err(
+                "Failed to load Binance Futures symbols from exchange info: HTTP status {d}",
+                .{@intFromEnum(req.response.status)},
+            );
             return error.ExchangeInfoRequestFailed;
         }
-        const body = try req.reader().readAllAlloc(self.allocator, 1024 * 1024 * 20);
+
+        const body = req.reader().readAllAlloc(self.allocator, 1024 * 1024 * 20) catch |err| {
+            std.log.err("Failed to read exchange info body: {}", .{err});
+            return err;
+        };
         defer self.allocator.free(body);
-        try self.parseAndStoreSymbols(body, sym_map);
+
+        self.parseAndStoreSymbols(body, sym_map) catch |err| {
+            std.log.err("Failed to load Binance Futures symbols from exchange info: {}", .{err});
+            return err;
+        };
 
         if (sym_map.count() == 0) {
             std.log.err("No Binance Futures USDT-PERP symbols available; aborting startup", .{});
@@ -84,12 +102,10 @@ pub const Client = struct {
         defer parsed.deinit();
         const root = parsed.value;
 
-        const symbols_array = root.object.get("symbols") orelse {
-            return error.NoSymbolsFound;
-        };
-        if (symbols_array != .array) {
-            return error.InvalidSymbolsFormat;
-        }
+        if (root != .object) return error.InvalidExchangeInfoFormat;
+
+        const symbols_array = root.object.get("symbols") orelse return error.NoSymbolsFound;
+        if (symbols_array != .array) return error.InvalidSymbolsFormat;
 
         // Futures USDT-PERP universe only
         for (symbols_array.array.items) |symbol_value| {
@@ -115,36 +131,44 @@ pub const Client = struct {
             try sym_map.put(owned_symbol, empty_symbol);
         }
 
-        if (sym_map.count() == 0) {
-            return error.EmptySymbolUniverse;
-        }
+        if (sym_map.count() == 0) return error.EmptySymbolUniverse;
     }
 
     fn selectBestEndpoint(self: *Client) !void {
-        var ping_ms = [_]u64{0} ** REST_ENDPOINTS.len;
+        var ping_results = [_]PingResult.{.{
+            .endpoint = REST_ENDPOINTS[0],
+        }, .{
+            .endpoint = REST_ENDPOINTS[1],
+        }, .{
+            .endpoint = REST_ENDPOINTS[2],
+        }};
         std.debug.print("Testing ping for {} Binance REST_ENDPOINTS...\n", .{REST_ENDPOINTS.len});
-        for (REST_ENDPOINTS, 0..) |endpoint, i| {
-            const ping_result = self.pingEndpoint(endpoint) catch |err| {
-                std.debug.print("Failed to ping {s}: {}", .{ endpoint, err });
+        for (ping_results, 0..) |*result, i| {
+            _ = i; // silence unused
+            const ping_result = self.pingEndpoint(result.endpoint) catch |err| {
+                std.debug.print("Failed to ping {s}: {}\n", .{ result.endpoint, err });
                 continue;
             };
 
-            ping_ms[i] = ping_result;
-            std.debug.print("Endpoint {s}: {}ms\n", .{ endpoint, ping_result });
+            result.latency_ms = ping_result;
+            result.ok = true;
+            std.debug.print("Endpoint {s}: {}ms\n", .{ result.endpoint, ping_result });
         }
-        var best_endpoint: ?[]const u8 = null;
-        var lowest_ping: u64 = std.math.maxInt(u64);
-        for (REST_ENDPOINTS, 0..) |endpoint, i| {
-            if (ping_ms[i] < lowest_ping) {
-                lowest_ping = ping_ms[i];
-                best_endpoint = endpoint;
+        var best_endpoint: ?PingResult = null;
+        for (ping_results) |result| {
+            if (!result.ok) continue;
+            if (best_endpoint == null or result.latency_ms < best_endpoint.?.latency_ms) {
+                best_endpoint = result;
             }
         }
-        if (best_endpoint) |endpoint| {
-            self.selected_endpoint = endpoint;
-            std.debug.print("Selected best endpoint: {s} ({}ms)\n", .{ endpoint, lowest_ping });
+        if (best_endpoint) |result| {
+            self.selected_endpoint = result.endpoint;
+            std.debug.print("Selected best endpoint: {s} ({}ms)\n", .{ result.endpoint, result.latency_ms });
         } else {
-            std.debug.print("No REST_ENDPOINTS responded, using default: {s}", .{REST_ENDPOINTS[0]});
+            std.debug.print(
+                "All Binance Futures endpoints failed ping; falling back to {s}\n",
+                .{REST_ENDPOINTS[0]},
+            );
             self.selected_endpoint = REST_ENDPOINTS[0];
         }
     }
