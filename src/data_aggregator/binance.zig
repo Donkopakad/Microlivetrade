@@ -134,14 +134,13 @@ pub const Client = struct {
         if (sym_map.count() == 0) return error.EmptySymbolUniverse;
     }
 
-    fn selectBestEndpoint(self: *Client) !void {
-        var ping_results = [_]PingResult.{.{
-            .endpoint = REST_ENDPOINTS[0],
-        }, .{
-            .endpoint = REST_ENDPOINTS[1],
-        }, .{
-            .endpoint = REST_ENDPOINTS[2],
-        }};
+       fn selectBestEndpoint(self: *Client) !void {
+        var ping_results = [_]PingResult{
+            .{ .endpoint = REST_ENDPOINTS[0] },
+            .{ .endpoint = REST_ENDPOINTS[1] },
+            .{ .endpoint = REST_ENDPOINTS[2] },
+        };
+
         std.debug.print("Testing ping for {} Binance REST_ENDPOINTS...\n", .{REST_ENDPOINTS.len});
         for (ping_results, 0..) |*result, i| {
             _ = i; // silence unused
@@ -167,7 +166,7 @@ pub const Client = struct {
         } else {
             std.debug.print(
                 "All Binance Futures endpoints failed ping; falling back to {s}\n",
-                .{REST_ENDPOINTS[0]},
+                .{ REST_ENDPOINTS[0] },
             );
             self.selected_endpoint = REST_ENDPOINTS[0];
         }
