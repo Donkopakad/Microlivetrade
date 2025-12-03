@@ -18,6 +18,10 @@ pub const PositionSide = enum {
 const TRADE_NOTIONAL_USDT: f64 = 125.0; // position size per trade
 const TRADE_LEVERAGE: f64 = 5.0;        // 5x leverage
 
+// Dust and exposure controls
+const DUST_NOTIONAL_THRESHOLD_USD: f64 = 1.0;
+const MAX_OPEN_POSITIONS: usize = 10;
+
 const PortfolioPosition = struct {
     symbol: []const u8,
     amount: f64,
@@ -41,6 +45,7 @@ pub const PortfolioManager = struct {
     fee_rate: f64,
 
     positions: std.StringHashMap(PortfolioPosition),
+    last_traded_candle_start_ns: std.StringHashMap(i128),
     margin_enforcer: margin.MarginEnforcer,
 
     trade_logger: ?*trade_log.TradeLogger,
@@ -58,6 +63,7 @@ pub const PortfolioManager = struct {
                 .balance_usdt = 1000.0,
                 .fee_rate = 0.001,
                 .positions = std.StringHashMap(PortfolioPosition).init(allocator),
+                .last_traded_candle_start_ns = std.StringHashMap(i128).init(allocator),
                 .margin_enforcer = margin.MarginEnforcer.init(allocator, true, binance_client),
                 .trade_logger = null,
                 .candle_duration_ns = 15 * 60 * 1_000_000_000,
@@ -92,6 +98,7 @@ pub const PortfolioManager = struct {
             .balance_usdt = starting_balance,
             .fee_rate = 0.001,
             .positions = std.StringHashMap(PortfolioPosition).init(allocator),
+            .last_traded_candle_start_ns = std.StringHashMap(i128).init(allocator),
             .margin_enforcer = margin.MarginEnforcer.init(allocator, true, binance_client),
             .trade_logger = logger,
             .candle_duration_ns = 15 * 60 * 1_000_000_000,
@@ -100,19 +107,29 @@ pub const PortfolioManager = struct {
 
     pub fn deinit(self: *PortfolioManager) void {
         self.cleanupPositions();
+        self.cleanupLastTraded();
         if (self.trade_logger) |logger| {
             logger.deinit();
             self.allocator.destroy(logger);
         }
         self.positions.deinit();
+        self.last_traded_candle_start_ns.deinit();
         self.margin_enforcer.deinit();
     }
 
     pub fn processSignal(self: *PortfolioManager, signal: TradingSignal) !void {
         const price = try symbol_map.getLastClosePrice(self.symbol_map, signal.symbol_name);
+        const candle_start_ns = self.currentCandleStart(signal.symbol_name, signal.timestamp);
+
+        // One-trade-per-symbol-per-candle guard
+        if (!self.canTradeThisCandle(signal.symbol_name, candle_start_ns)) {
+            std.log.info("Skipping signal for {s}; already traded this candle", .{signal.symbol_name});
+            return;
+        }
+
         switch (signal.signal_type) {
-            .BUY => self.executeBuy(signal, price),
-            .SELL => self.executeSell(signal, price),
+            .BUY => self.executeBuy(signal, price, candle_start_ns),
+            .SELL => self.executeSell(signal, price, candle_start_ns),
             .HOLD => {},
         }
     }
@@ -141,9 +158,74 @@ pub const PortfolioManager = struct {
                 }
             }
         }
+
+        // Dust cleanup at 15-minute boundaries (or whenever this routine runs)
+        var dust_it = self.positions.iterator();
+        while (dust_it.next()) |entry| {
+            const pos = entry.value_ptr;
+            if (!pos.is_open) continue;
+
+            const price = symbol_map.getLastClosePrice(self.symbol_map, entry.key_ptr.*) catch {
+                continue;
+            };
+            const notional = @abs(pos.amount * price);
+            if (notional < DUST_NOTIONAL_THRESHOLD_USD) {
+                std.log.info(
+                    "Closing dust position for {s}: notional={d:.4} USDT < 1.0",
+                    .{ entry.key_ptr.*, notional },
+                );
+                if (pos.side == .long) {
+                    self.closeLong(pos, price);
+                } else if (pos.side == .short) {
+                    self.closeShort(pos, price);
+                }
+            }
+        }
     }
 
-    fn executeBuy(self: *PortfolioManager, signal: TradingSignal, price: f64) void {
+    pub fn getPositionSide(self: *PortfolioManager, symbol_name: []const u8) PositionSide {
+        if (self.positions.getPtr(symbol_name)) |pos| {
+            if (pos.is_open) return pos.side;
+        }
+        return .none;
+    }
+
+    fn canTradeThisCandle(self: *PortfolioManager, symbol_name: []const u8, candle_start_ns: i128) bool {
+        if (self.last_traded_candle_start_ns.get(symbol_name)) |last| {
+            if (last == candle_start_ns) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn markCandleTraded(self: *PortfolioManager, symbol_name: []const u8, candle_start_ns: i128) void {
+        if (self.last_traded_candle_start_ns.getPtr(symbol_name)) |ptr| {
+            ptr.* = candle_start_ns;
+            return;
+        }
+
+        const key_copy = self.allocator.dupe(u8, symbol_name) catch |err| {
+            std.log.err("Failed to record traded candle for {s}: {}", .{ symbol_name, err });
+            return;
+        };
+        self.last_traded_candle_start_ns.put(key_copy, candle_start_ns) catch |err| {
+            std.log.err("Failed to insert traded candle record for {s}: {}", .{ symbol_name, err });
+        };
+    }
+
+    pub fn countOpenPositions(self: *PortfolioManager) usize {
+        var count: usize = 0;
+        var it = self.positions.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.is_open) {
+                count += 1;
+            }
+        }
+        return count;
+    }
+
+    fn executeBuy(self: *PortfolioManager, signal: TradingSignal, price: f64, candle_start_ns: i128) void {
         self.margin_enforcer.ensureIsolatedMargin(signal.symbol_name) catch |err| {
             std.log.err("Failed to enforce isolated margin for {s}: {}", .{ signal.symbol_name, err });
             return;
@@ -158,10 +240,10 @@ pub const PortfolioManager = struct {
             }
         }
 
-        self.openPosition(signal, price, .long);
+        self.openPosition(signal, price, .long, candle_start_ns);
     }
 
-    fn executeSell(self: *PortfolioManager, signal: TradingSignal, price: f64) void {
+    fn executeSell(self: *PortfolioManager, signal: TradingSignal, price: f64, candle_start_ns: i128) void {
         self.margin_enforcer.ensureIsolatedMargin(signal.symbol_name) catch |err| {
             std.log.err("Failed to enforce isolated margin for {s}: {}", .{ signal.symbol_name, err });
             return;
@@ -176,13 +258,20 @@ pub const PortfolioManager = struct {
             }
         }
 
-        self.openPosition(signal, price, .short);
+        self.openPosition(signal, price, .short, candle_start_ns);
     }
 
-    fn openPosition(self: *PortfolioManager, signal: TradingSignal, price: f64, side: PositionSide) void {
+    fn openPosition(self: *PortfolioManager, signal: TradingSignal, price: f64, side: PositionSide, candle_start_ns: i128) void {
         // ✅ Fixed leverage & notional
         const leverage: f64 = TRADE_LEVERAGE;              // 5x
         const position_size_usdt: f64 = TRADE_NOTIONAL_USDT; // 125 USDT position
+
+        // Enforce global open position cap
+        const open_positions = self.countOpenPositions();
+        if (open_positions >= MAX_OPEN_POSITIONS) {
+            std.log.warn("Max open positions ({d}) reached; ignoring signal for {s}", .{ MAX_OPEN_POSITIONS, signal.symbol_name });
+            return;
+        }
 
         // Margin needed ≈ notional / leverage (≈ 25 USDT)
         const required_margin = position_size_usdt / leverage;
@@ -196,7 +285,6 @@ pub const PortfolioManager = struct {
             return;
         }
 
-        const candle_start_ns = self.currentCandleStart(signal.symbol_name, signal.timestamp);
         const candle_end_ns = candle_start_ns + self.candle_duration_ns;
 
         if (self.binance_client.isLive()) {
@@ -211,6 +299,7 @@ pub const PortfolioManager = struct {
                 const entry_price = if (order.avg_price > 0) order.avg_price else price;
                 const actual_notional = if (order.cum_quote > 0) order.cum_quote else position_size_usdt;
                 self.recordPosition(signal, side, amount, entry_price, candle_start_ns, candle_end_ns, actual_notional, order.order_id);
+                self.markCandleTraded(signal.symbol_name, candle_start_ns);
                 std.log.info("Opened LONG on Binance {s} orderId={} qty={d:.6} price=${d:.4}", .{ signal.symbol_name, order.order_id, amount, entry_price });
             } else {
                 self.binance_client.setLeverage(signal.symbol_name, @intFromFloat(leverage)) catch {};
@@ -223,11 +312,13 @@ pub const PortfolioManager = struct {
                 const entry_price = if (order.avg_price > 0) order.avg_price else price;
                 const actual_notional = if (order.cum_quote > 0) order.cum_quote else position_size_usdt;
                 self.recordPosition(signal, side, amount, entry_price, candle_start_ns, candle_end_ns, actual_notional, order.order_id);
+                self.markCandleTraded(signal.symbol_name, candle_start_ns);
                 std.log.info("Opened SHORT on Binance {s} orderId={} qty={d:.6} price=${d:.4}", .{ signal.symbol_name, order.order_id, amount, entry_price });
             }
         } else {
             const amount = position_size_usdt / price;
             self.recordPosition(signal, side, amount, price, candle_start_ns, candle_end_ns, position_size_usdt, null);
+            self.markCandleTraded(signal.symbol_name, candle_start_ns);
             std.log.info("Opened simulated {s} {s} qty={d:.6} price=${d:.4}", .{ (if (side == .long) "LONG" else "SHORT"), signal.symbol_name, amount, price });
         }
     }
@@ -329,6 +420,13 @@ pub const PortfolioManager = struct {
 
     fn cleanupPositions(self: *PortfolioManager) void {
         var it = self.positions.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+    }
+
+    fn cleanupLastTraded(self: *PortfolioManager) void {
+        var it = self.last_traded_candle_start_ns.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
         }
