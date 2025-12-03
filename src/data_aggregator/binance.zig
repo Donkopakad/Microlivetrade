@@ -9,18 +9,15 @@ const Symbol = @import("../types.zig").Symbol;
 const WSClient = @import("binance_ws.zig").WSClient;
 const metrics = @import("../metrics.zig");
 
-const REST_ENDPOINTS = [6][]const u8{
-    "https://api.binance.com",
-    "https://api-gcp.binance.com",
-    "https://api1.binance.com",
-    "https://api2.binance.com",
-    "https://api3.binance.com",
-    "https://api4.binance.com",
+const REST_ENDPOINTS = [3][]const u8{
+    "https://fapi.binance.com",
+    "https://fapi1.binance.com",
+    "https://fapi2.binance.com",
 };
 
-const PING_API = "/api/v3/ping";
-const EXCHANGE_INFO_API = "/api/v3/exchangeInfo";
-const TIME_API = "/api/v3/time";
+const PING_API = "/fapi/v1/ping";
+const EXCHANGE_INFO_API = "/fapi/v1/exchangeInfo";
+const TIME_API = "/fapi/v1/time";
 
 pub const Client = struct {
     selected_endpoint: []const u8,
@@ -71,6 +68,11 @@ pub const Client = struct {
         defer self.allocator.free(body);
         try self.parseAndStoreSymbols(body, sym_map);
 
+        if (sym_map.count() == 0) {
+            std.log.err("No Binance Futures USDT-PERP symbols available; aborting startup", .{});
+            return error.EmptySymbolUniverse;
+        }
+
         std.debug.print("Loaded {} symbols\n", .{sym_map.count()});
     }
 
@@ -89,39 +91,32 @@ pub const Client = struct {
             return error.InvalidSymbolsFormat;
         }
 
+        // Futures USDT-PERP universe only
         for (symbols_array.array.items) |symbol_value| {
             if (symbol_value != .object) continue;
             const symbol_obj = symbol_value.object;
 
-            // only USDT pairs
             const symbol_name_val = symbol_obj.get("symbol") orelse continue;
             if (symbol_name_val != .string) continue;
             const symbol_str = symbol_name_val.string;
             if (symbol_str.len < 5 or !std.mem.endsWith(u8, symbol_str, "USDT")) continue;
-            // only "status": "TRADING"
+
+            const quote_asset_val = symbol_obj.get("quoteAsset") orelse continue;
+            if (quote_asset_val != .string or !std.mem.eql(u8, quote_asset_val.string, "USDT")) continue;
+
+            const contract_type_val = symbol_obj.get("contractType") orelse continue;
+            if (contract_type_val != .string or !std.mem.eql(u8, contract_type_val.string, "PERPETUAL")) continue;
+
             const status_val = symbol_obj.get("status") orelse continue;
             if (status_val != .string or !std.mem.eql(u8, status_val.string, "TRADING")) continue;
-            // only SPOT Trading tokens
-            const permission_sets_val = symbol_obj.get("permissionSets") orelse continue;
-            if (permission_sets_val != .array) continue;
-
-            var found_spot = false;
-            for (permission_sets_val.array.items) |permission_set_group| {
-                if (permission_set_group != .array) continue;
-                for (permission_set_group.array.items) |perm_val| {
-                    if (perm_val != .string) continue;
-                    if (std.mem.eql(u8, perm_val.string, "SPOT")) {
-                        found_spot = true;
-                        break;
-                    }
-                }
-                if (found_spot) break;
-            }
-            if (!found_spot) continue;
 
             const owned_symbol = try self.allocator.dupe(u8, symbol_str);
             const empty_symbol = Symbol.init();
             try sym_map.put(owned_symbol, empty_symbol);
+        }
+
+        if (sym_map.count() == 0) {
+            return error.EmptySymbolUniverse;
         }
     }
 
