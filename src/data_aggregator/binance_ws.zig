@@ -59,25 +59,25 @@ pub const WSClient = struct {
     pub fn startListener(self: *WSClient, symbol_map: *SymbolMap) !void {
         // ---- INIT BOTH WS CLIENTS ----
         self.ticker_client = try websocket.Client.init(self.allocator, .{
-            .host = "stream.binance.com",
-            .port = 9443,
+            .host = "fstream.binance.com",
+            .port = 443,
             .tls = true,
         });
 
         self.depth_client = try websocket.Client.init(self.allocator, .{
-            .host = "stream.binance.com",
+            .host = "fstream.binance.com",
             .port = 443,
             .tls = true,
         });
 
         try self.ticker_client.handshake("/ws", .{
             .timeout_ms = 5000,
-            .headers = "Host: stream.binance.com:9443",
+            .headers = "Host: fstream.binance.com:443",
         });
 
         try self.depth_client.handshake("/ws", .{
             .timeout_ms = 5000,
-            .headers = "Host: stream.binance.com:9443",
+            .headers = "Host: fstream.binance.com:443",
         });
 
         // ---- CONSTRUCT STREAM NAMES ----
