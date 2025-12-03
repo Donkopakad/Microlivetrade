@@ -46,6 +46,7 @@ pub const PortfolioManager = struct {
 
     positions: std.StringHashMap(PortfolioPosition),
     last_traded_candle_start_ns: std.StringHashMap(i128),
+    last_skip_log_candle: std.StringHashMap(i128),
     margin_enforcer: margin.MarginEnforcer,
 
     trade_logger: ?*trade_log.TradeLogger,
@@ -64,6 +65,7 @@ pub const PortfolioManager = struct {
                 .fee_rate = 0.001,
                 .positions = std.StringHashMap(PortfolioPosition).init(allocator),
                 .last_traded_candle_start_ns = std.StringHashMap(i128).init(allocator),
+                .last_skip_log_candle = std.StringHashMap(i128).init(allocator),
                 .margin_enforcer = margin.MarginEnforcer.init(allocator, true, binance_client),
                 .trade_logger = null,
                 .candle_duration_ns = 15 * 60 * 1_000_000_000,
@@ -99,6 +101,7 @@ pub const PortfolioManager = struct {
             .fee_rate = 0.001,
             .positions = std.StringHashMap(PortfolioPosition).init(allocator),
             .last_traded_candle_start_ns = std.StringHashMap(i128).init(allocator),
+            .last_skip_log_candle = std.StringHashMap(i128).init(allocator),
             .margin_enforcer = margin.MarginEnforcer.init(allocator, true, binance_client),
             .trade_logger = logger,
             .candle_duration_ns = 15 * 60 * 1_000_000_000,
@@ -114,6 +117,7 @@ pub const PortfolioManager = struct {
         }
         self.positions.deinit();
         self.last_traded_candle_start_ns.deinit();
+        self.last_skip_log_candle.deinit();
         self.margin_enforcer.deinit();
     }
 
@@ -123,7 +127,18 @@ pub const PortfolioManager = struct {
 
         // One-trade-per-symbol-per-candle guard
         if (!self.canTradeThisCandle(signal.symbol_name, candle_start_ns)) {
+            // Only log once per symbol per candle
+            if (self.last_skip_log_candle.get(signal.symbol_name)) |prev_ptr| {
+                if (prev_ptr.* == candle_start_ns) {
+                    // We already logged this skip for this symbol in this candle; just skip silently
+                    return;
+                }
+            }
+
             std.log.info("Skipping signal for {s}; already traded this candle", .{signal.symbol_name});
+
+            // Record that we logged for this symbol+candle
+            try self.last_skip_log_candle.put(signal.symbol_name, candle_start_ns);
             return;
         }
 
