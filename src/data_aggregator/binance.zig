@@ -51,7 +51,7 @@ pub const Client = struct {
 
     pub fn connect(self: *Client) !void {
         try self.selectBestEndpoint();
-        std.debug.print("Connecting to Binance using endpoint: {s}\n", .{self.selected_endpoint});
+        std.debug.print("Connecting to Binance using endpoint: {s}\n", .{ self.selected_endpoint });
     }
 
     pub fn loadSymbols(self: *Client, sym_map: *SymbolMap) !void {
@@ -59,6 +59,7 @@ pub const Client = struct {
         var exchange_url_buf: [256]u8 = undefined;
         const exchange_url = try std.fmt.bufPrint(&exchange_url_buf, "{s}{s}", .{ self.selected_endpoint, EXCHANGE_INFO_API });
         const uri = try std.Uri.parse(exchange_url);
+
         var req = try self.http_client.open(.GET, uri, .{
             .server_header_buffer = try self.allocator.alloc(u8, 8192),
         });
@@ -70,19 +71,19 @@ pub const Client = struct {
         if (req.response.status != .ok) {
             std.log.err(
                 "Failed to load Binance Futures symbols from exchange info: HTTP status {d}",
-                .{@intFromEnum(req.response.status)},
+                .{ @intFromEnum(req.response.status) },
             );
             return error.ExchangeInfoRequestFailed;
         }
 
         const body = req.reader().readAllAlloc(self.allocator, 1024 * 1024 * 20) catch |err| {
-            std.log.err("Failed to read exchange info body: {}", .{err});
+            std.log.err("Failed to read exchange info body: {}", .{ err });
             return err;
         };
         defer self.allocator.free(body);
 
         self.parseAndStoreSymbols(body, sym_map) catch |err| {
-            std.log.err("Failed to load Binance Futures symbols from exchange info: {}", .{err});
+            std.log.err("Failed to load Binance Futures symbols from exchange info: {}", .{ err });
             return err;
         };
 
@@ -91,12 +92,12 @@ pub const Client = struct {
             return error.EmptySymbolUniverse;
         }
 
-        std.debug.print("Loaded {} symbols\n", .{sym_map.count()});
+        std.debug.print("Loaded {} symbols\n", .{ sym_map.count() });
     }
 
     fn parseAndStoreSymbols(self: *Client, json_data: []const u8, sym_map: *SymbolMap) !void {
         var parsed = json.parseFromSlice(json.Value, self.allocator, json_data, .{}) catch |err| {
-            std.log.err("Failed to parse JSON: {}", .{err});
+            std.log.err("Failed to parse JSON: {}", .{ err });
             return err;
         };
         defer parsed.deinit();
@@ -134,15 +135,15 @@ pub const Client = struct {
         if (sym_map.count() == 0) return error.EmptySymbolUniverse;
     }
 
-       fn selectBestEndpoint(self: *Client) !void {
+    fn selectBestEndpoint(self: *Client) !void {
         var ping_results = [_]PingResult{
             .{ .endpoint = REST_ENDPOINTS[0] },
             .{ .endpoint = REST_ENDPOINTS[1] },
             .{ .endpoint = REST_ENDPOINTS[2] },
         };
 
-        std.debug.print("Testing ping for {} Binance REST_ENDPOINTS...\n", .{REST_ENDPOINTS.len});
-        for (ping_results, 0..) |*result, i| {
+        std.debug.print("Testing ping for {} Binance REST_ENDPOINTS...\n", .{ REST_ENDPOINTS.len });
+        for (&ping_results, 0..) |*result, i| {
             _ = i; // silence unused
             const ping_result = self.pingEndpoint(result.endpoint) catch |err| {
                 std.debug.print("Failed to ping {s}: {}\n", .{ result.endpoint, err });
@@ -153,6 +154,7 @@ pub const Client = struct {
             result.ok = true;
             std.debug.print("Endpoint {s}: {}ms\n", .{ result.endpoint, ping_result });
         }
+
         var best_endpoint: ?PingResult = null;
         for (ping_results) |result| {
             if (!result.ok) continue;
@@ -160,6 +162,7 @@ pub const Client = struct {
                 best_endpoint = result;
             }
         }
+
         if (best_endpoint) |result| {
             self.selected_endpoint = result.endpoint;
             std.debug.print("Selected best endpoint: {s} ({}ms)\n", .{ result.endpoint, result.latency_ms });
@@ -174,6 +177,7 @@ pub const Client = struct {
 
     fn pingEndpoint(self: *Client, endpoint: []const u8) !u64 {
         const start_time = time.nanoTimestamp();
+
         var ping_url_buf: [256]u8 = undefined;
         const ping_url = try std.fmt.bufPrint(&ping_url_buf, "{s}{s}", .{ endpoint, PING_API });
         const uri = try std.Uri.parse(ping_url);
@@ -188,6 +192,7 @@ pub const Client = struct {
 
         const end_time = time.nanoTimestamp();
         const ping_ms = @as(u64, @intCast(@divTrunc(end_time - start_time, time.ns_per_ms)));
+
         if (req.response.status != .ok) {
             return error.BadResponse;
         }
