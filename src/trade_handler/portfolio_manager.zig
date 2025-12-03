@@ -56,7 +56,7 @@ pub const PortfolioManager = struct {
     pub fn init(allocator: std.mem.Allocator, sym_map: *const SymbolMap, binance_client: *binance.BinanceFuturesClient) PortfolioManager {
         var logger: ?*trade_log.TradeLogger = null;
         logger = trade_log.TradeLogger.init(allocator) catch |err| {
-            std.log.err("Failed to initialize trade logger: {}", .{err});
+            std.log.err("Failed to initialize trade logger: {}", .{ err });
             return PortfolioManager{
                 .allocator = allocator,
                 .symbol_map = sym_map,
@@ -80,14 +80,14 @@ pub const PortfolioManager = struct {
                 // val has type ?f64
                 balance_opt = val;
             } else |err| {
-                std.log.err("Failed to fetch USDT balance from Binance: {}", .{err});
+                std.log.err("Failed to fetch USDT balance from Binance: {}", .{ err });
             }
 
             if (balance_opt) |balance| {
                 starting_balance = balance;
-                std.log.info("Initialized live balance from Binance: ${d:.2} USDT", .{balance});
+                std.log.info("Initialized live balance from Binance: ${d:.2} USDT", .{ balance });
             } else {
-                std.log.warn("Binance balance unavailable, defaulting to simulated balance ${d:.2}", .{starting_balance});
+                std.log.warn("Binance balance unavailable, defaulting to simulated balance ${d:.2}", .{ starting_balance });
             }
         } else {
             std.log.err("Binance futures credentials missing, running in dry-run mode for order placement", .{});
@@ -128,14 +128,14 @@ pub const PortfolioManager = struct {
         // One-trade-per-symbol-per-candle guard
         if (!self.canTradeThisCandle(signal.symbol_name, candle_start_ns)) {
             // Only log once per symbol per candle
-            if (self.last_skip_log_candle.get(signal.symbol_name)) |prev_ptr| {
-                if (prev_ptr.* == candle_start_ns) {
+            if (self.last_skip_log_candle.get(signal.symbol_name)) |prev_value| {
+                if (prev_value == candle_start_ns) {
                     // We already logged this skip for this symbol in this candle; just skip silently
                     return;
                 }
             }
 
-            std.log.info("Skipping signal for {s}; already traded this candle", .{signal.symbol_name});
+            std.log.info("Skipping signal for {s}; already traded this candle", .{ signal.symbol_name });
 
             // Record that we logged for this symbol+candle
             try self.last_skip_log_candle.put(signal.symbol_name, candle_start_ns);
@@ -278,7 +278,7 @@ pub const PortfolioManager = struct {
 
     fn openPosition(self: *PortfolioManager, signal: TradingSignal, price: f64, side: PositionSide, candle_start_ns: i128) void {
         // ✅ Fixed leverage & notional
-        const leverage: f64 = TRADE_LEVERAGE;              // 5x
+        const leverage: f64 = TRADE_LEVERAGE;                // 5x
         const position_size_usdt: f64 = TRADE_NOTIONAL_USDT; // 125 USDT position
 
         // Enforce global open position cap
