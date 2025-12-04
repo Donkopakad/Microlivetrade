@@ -395,8 +395,10 @@ pub const Symbol = struct {
         return ((self.current_price - self.candle_open_price) / self.candle_open_price) * 100.0;
     }
 
-    pub fn startNewCandle(self: *Symbol, new_candle_start_ms: i64) void {
+    pub fn startNewCandle(self: *Symbol, new_candle_start_ms: i64, new_open_price: f64) void {
         self.candle_start_time = new_candle_start_ms;
-        self.candle_open_price = self.current_price;
+        self.candle_open_price = new_open_price;
+        self.current_price = new_open_price;
+        self.last_update_time = new_candle_start_ms;
     }
 };
