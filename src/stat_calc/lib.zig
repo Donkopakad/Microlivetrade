@@ -1,5 +1,7 @@
 const std = @import("std");
-const cuda_lib = @import("kernel.zig");
+const cuda_lib = @cImport({
+    @cInclude("kernel.h");
+});
 const types = @import("../types.zig");
 const errors = @import("../errors.zig");
 const SymbolMap = @import("../symbol-map.zig").SymbolMap;
