@@ -114,12 +114,22 @@ pub const SignalEngine = struct {
 
     pub fn generateSignalsFromGpuResults(self: *SignalEngine, results: *GPUPercentageChangeResultBatch) !void {
         const now_ts: i128 = @intCast(std.time.nanoTimestamp());
+        const candle_duration_ns: i128 = 15 * 60 * 1_000_000_000;
         for (0..results.count) |i| {
             const pct = results.device.percentage_change[i];
             const symbol_name = results.symbols[i];
             if (symbol_name.len == 0) continue;
 
+            const candle_start_ns: i128 = @intCast(results.device.candle_timestamp[i]);
+            const candle_end_ns = candle_start_ns + candle_duration_ns;
+            const open_price: f64 = @floatCast(results.device.candle_open_price[i]);
+            const current_price: f64 = @floatCast(results.device.current_price[i]);
+
             if (pct >= engine_types.BUY_THRESHOLD) {
+                std.log.info(
+                    "Exact percentage increase signal for {s}: pct={d:+.2}% inside timeframe {d} -> {d}, at {d}, calculated with open={d:.4} vs current={d:.4}. Trade start time will be {d} and will be closed at {d}.",
+                    .{ symbol_name, pct, candle_start_ns, candle_end_ns, now_ts, open_price, current_price, candle_start_ns, candle_end_ns },
+                );
                 const signal = TradingSignal{
                     .symbol_name = symbol_name,
                     .signal_type = SignalType.BUY,
@@ -131,6 +141,10 @@ pub const SignalEngine = struct {
                 };
                 try self.trade_handler.addSignal(signal);
             } else if (pct <= engine_types.SELL_THRESHOLD) {
+                std.log.info(
+                    "Exact percentage decrease signal for {s}: pct={d:+.2}% inside timeframe {d} -> {d}, at {d}, calculated with open={d:.4} vs current={d:.4}. Trade start time will be {d} and will be closed at {d}.",
+                    .{ symbol_name, pct, candle_start_ns, candle_end_ns, now_ts, open_price, current_price, candle_start_ns, candle_end_ns },
+                );
                 const signal = TradingSignal{
                     .symbol_name = symbol_name,
                     .signal_type = SignalType.SELL,
