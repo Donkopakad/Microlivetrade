@@ -269,8 +269,6 @@ pub const StatCalc = struct {
             const current_price = if (sym.current_price != 0.0) sym.current_price else current_price_f64;
             const candle_open = if (sym.candle_open_price != 0.0)
                 sym.candle_open_price
-            else if (sym.count > 0)
-                sym.ticker_queue[(sym.head + 15 - sym.count) % 15].close_price
             else
                 current_price;
 
