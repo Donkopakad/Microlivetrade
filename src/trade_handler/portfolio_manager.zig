@@ -34,6 +34,7 @@ const PortfolioPosition = struct {
     side: PositionSide,
     leverage: f32,
     order_id: ?i64,
+    trade_id: u64,
 };
 
 pub const PortfolioManager = struct {
@@ -50,6 +51,8 @@ pub const PortfolioManager = struct {
     margin_enforcer: margin.MarginEnforcer,
 
     trade_logger: ?*trade_log.TradeLogger,
+
+    next_trade_id: u64,
 
     candle_duration_ns: i128,
 
@@ -69,6 +72,7 @@ pub const PortfolioManager = struct {
                 .margin_enforcer = margin.MarginEnforcer.init(allocator, true, binance_client),
                 .trade_logger = null,
                 .candle_duration_ns = 15 * 60 * 1_000_000_000,
+                .next_trade_id = 1,
             };
         };
 
@@ -105,6 +109,7 @@ pub const PortfolioManager = struct {
             .margin_enforcer = margin.MarginEnforcer.init(allocator, true, binance_client),
             .trade_logger = logger,
             .candle_duration_ns = 15 * 60 * 1_000_000_000,
+            .next_trade_id = 1,
         };
     }
 
@@ -363,11 +368,13 @@ pub const PortfolioManager = struct {
                 .side = .none,
                 .leverage = 1.0,
                 .order_id = null,
+                .trade_id = 0,
             }) catch unreachable;
         }
 
         var pos = self.positions.getPtr(signal.symbol_name).?;
         pos.symbol = signal.symbol_name;
+        pos.trade_id = self.next_trade_id;
         pos.amount = amount;
         pos.avg_entry_price = entry_price;
         pos.entry_timestamp = signal.timestamp;
@@ -379,10 +386,27 @@ pub const PortfolioManager = struct {
         pos.leverage = @floatCast(signal.leverage); // kept as-is; just for record
         pos.order_id = order_id;
 
-        if (self.trade_logger) |_| {
-            // Trade logging temporarily disabled to avoid mismatches with TradeLogger API.
-            // TODO: re-enable once TradeLogger has a matching log function.
+        std.log.info(
+            "TRADE OPENED [#{}] {s} {s}\nopen_price=${d:.4} size={d:.6} notional={d:.4}\ncandle={d} -> {d}",
+            .{
+                pos.trade_id,
+                (if (side == .long) "LONG" else "SHORT"),
+                signal.symbol_name,
+                pos.avg_entry_price,
+                pos.amount,
+                pos.position_size_usdt,
+                pos.candle_start_timestamp,
+                pos.candle_end_timestamp,
+            },
+        );
+
+        if (self.trade_logger) |logger| {
+            logger.logOpen(pos.trade_id, pos.symbol, (if (side == .long) "LONG" else "SHORT"), pos.entry_timestamp, pos.avg_entry_price, pos.amount, pos.position_size_usdt) catch |err| {
+                std.log.err("Failed to write trade open log: {}", .{ err });
+            };
         }
+
+        self.next_trade_id += 1;
     }
 
     fn currentCandleStart(self: *PortfolioManager, symbol_name: []const u8, timestamp: i128) i128 {
@@ -394,8 +418,13 @@ pub const PortfolioManager = struct {
     }
 
     fn closeLong(self: *PortfolioManager, pos: *PortfolioPosition, price: f64) void {
-        if (!pos.is_open or pos.side != .long) return;
+        if (pos.side != .long) return;
+        if (!pos.is_open or pos.amount <= 0) {
+            self.logNotOpenToClose(pos);
+            return;
+        }
         const pnl = (price - pos.avg_entry_price) * pos.amount;
+        const close_ts: i128 = @intCast(std.time.nanoTimestamp());
         self.balance_usdt += pnl - (pos.amount * pos.avg_entry_price * self.fee_rate) - (pos.amount * price * self.fee_rate);
 
         if (self.binance_client.isLive()) {
@@ -409,13 +438,29 @@ pub const PortfolioManager = struct {
             std.log.info("Closed simulated LONG {s} qty={d:.6} price=${d:.4} PnL=${d:.4}", .{ pos.symbol, pos.amount, price, pnl });
         }
 
+        std.log.info(
+            "TRADE CLOSED [#{}] LONG {s}\nentry_price=${d:.4} close_price=${d:.4} size={d:.6} pnl={d:.4}",
+            .{ pos.trade_id, pos.symbol, pos.avg_entry_price, price, pos.amount, pnl },
+        );
+
+        if (self.trade_logger) |logger| {
+            logger.logClose(pos.trade_id, pos.symbol, "LONG", pos.entry_timestamp, close_ts, pos.avg_entry_price, price, pos.amount, pos.position_size_usdt, pnl) catch |err| {
+                std.log.err("Failed to write trade close log: {}", .{ err });
+            };
+        }
+
         pos.is_open = false;
         pos.side = .none;
     }
 
     fn closeShort(self: *PortfolioManager, pos: *PortfolioPosition, price: f64) void {
-        if (!pos.is_open or pos.side != .short) return;
+        if (pos.side != .short) return;
+        if (!pos.is_open or pos.amount <= 0) {
+            self.logNotOpenToClose(pos);
+            return;
+        }
         const pnl = (pos.avg_entry_price - price) * pos.amount;
+        const close_ts: i128 = @intCast(std.time.nanoTimestamp());
         self.balance_usdt += pnl - (pos.amount * pos.avg_entry_price * self.fee_rate) - (pos.amount * price * self.fee_rate);
 
         if (self.binance_client.isLive()) {
@@ -429,8 +474,32 @@ pub const PortfolioManager = struct {
             std.log.info("Closed simulated SHORT {s} qty={d:.6} price=${d:.4} PnL=${d:.4}", .{ pos.symbol, pos.amount, price, pnl });
         }
 
+        std.log.info(
+            "TRADE CLOSED [#{}] SHORT {s}\nentry_price=${d:.4} close_price=${d:.4} size={d:.6} pnl={d:.4}",
+            .{ pos.trade_id, pos.symbol, pos.avg_entry_price, price, pos.amount, pnl },
+        );
+
+        if (self.trade_logger) |logger| {
+            logger.logClose(pos.trade_id, pos.symbol, "SHORT", pos.entry_timestamp, close_ts, pos.avg_entry_price, price, pos.amount, pos.position_size_usdt, pnl) catch |err| {
+                std.log.err("Failed to write trade close log: {}", .{ err });
+            };
+        }
+
         pos.is_open = false;
         pos.side = .none;
+    }
+
+    fn logNotOpenToClose(self: *PortfolioManager, pos: *PortfolioPosition) void {
+        std.log.warn(
+            "TRADE NOT OPEN TO CLOSE [#{}] {s} opened at {d} is not open to close.",
+            .{ pos.trade_id, pos.symbol, pos.entry_timestamp },
+        );
+
+        if (self.trade_logger) |logger| {
+            logger.logInvalidClose(pos.trade_id, pos.symbol, pos.entry_timestamp) catch |err| {
+                std.log.err("Failed to write invalid close log: {}", .{ err });
+            };
+        }
     }
 
     fn cleanupPositions(self: *PortfolioManager) void {
