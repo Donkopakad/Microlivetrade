@@ -87,9 +87,7 @@ pub const TickerHandler = struct {
             if (sym.candle_start_time == 0) {
                 sym.initCandleWithPreviousClose(close_price, candle_ms);
             } else if (candle_ms != sym.candle_start_time) {
-                const prev_close = sym.current_price;
-                sym.startNewCandle(candle_ms);
-                sym.current_price = prev_close;
+                sym.startNewCandle(candle_ms, close_price);
             }
 
             sym.updateCurrentPrice(close_price, event_time_ms);
