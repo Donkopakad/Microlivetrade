@@ -313,8 +313,27 @@ pub const PortfolioManager = struct {
                 const amount = if (order.executed_qty > 0) order.executed_qty else position_size_usdt / price;
                 const entry_price = if (order.avg_price > 0) order.avg_price else price;
                 const actual_notional = if (order.cum_quote > 0) order.cum_quote else position_size_usdt;
+
                 self.recordPosition(signal, side, amount, entry_price, candle_start_ns, candle_end_ns, actual_notional, order.order_id);
                 self.markCandleTraded(signal.symbol_name, candle_start_ns);
+
+                // 🌟 HUMAN-READABLE OPEN LOG (LONG)
+                const direction_word: []const u8 = "decrease";
+                std.log.info(
+                    "Exact percentage {s} signal for {s} inside timeframe [{d} - {d}] at {d}, calculated with open price ~{d:.6} vs current price {d:.6}. Trade start {d}, will be closed at {d}.",
+                    .{
+                        direction_word,
+                        signal.symbol_name,
+                        candle_start_ns,
+                        candle_end_ns,
+                        signal.timestamp,
+                        entry_price, // we approximate candle-open as entry here for logging
+                        entry_price,
+                        signal.timestamp,
+                        candle_end_ns,
+                    },
+                );
+
                 std.log.info("Opened LONG on Binance {s} orderId={} qty={d:.6} price=${d:.4}", .{ signal.symbol_name, order.order_id, amount, entry_price });
             } else {
                 self.binance_client.setLeverage(signal.symbol_name, @intFromFloat(leverage)) catch {};
@@ -326,14 +345,50 @@ pub const PortfolioManager = struct {
                 const amount = if (order.executed_qty > 0) order.executed_qty else position_size_usdt / price;
                 const entry_price = if (order.avg_price > 0) order.avg_price else price;
                 const actual_notional = if (order.cum_quote > 0) order.cum_quote else position_size_usdt;
+
                 self.recordPosition(signal, side, amount, entry_price, candle_start_ns, candle_end_ns, actual_notional, order.order_id);
                 self.markCandleTraded(signal.symbol_name, candle_start_ns);
+
+                // 🌟 HUMAN-READABLE OPEN LOG (SHORT)
+                const direction_word: []const u8 = "increase";
+                std.log.info(
+                    "Exact percentage {s} signal for {s} inside timeframe [{d} - {d}] at {d}, calculated with open price ~{d:.6} vs current price {d:.6}. Trade start {d}, will be closed at {d}.",
+                    .{
+                        direction_word,
+                        signal.symbol_name,
+                        candle_start_ns,
+                        candle_end_ns,
+                        signal.timestamp,
+                        entry_price,
+                        entry_price,
+                        signal.timestamp,
+                        candle_end_ns,
+                    },
+                );
+
                 std.log.info("Opened SHORT on Binance {s} orderId={} qty={d:.6} price=${d:.4}", .{ signal.symbol_name, order.order_id, amount, entry_price });
             }
         } else {
             const amount = position_size_usdt / price;
             self.recordPosition(signal, side, amount, price, candle_start_ns, candle_end_ns, position_size_usdt, null);
             self.markCandleTraded(signal.symbol_name, candle_start_ns);
+
+            const direction_word: []const u8 = if (side == .long) "decrease" else "increase";
+            std.log.info(
+                "Exact percentage {s} signal for {s} inside timeframe [{d} - {d}] at {d}, calculated with open price ~{d:.6} vs current price {d:.6}. Trade start {d}, will be closed at {d}.",
+                .{
+                    direction_word,
+                    signal.symbol_name,
+                    candle_start_ns,
+                    candle_end_ns,
+                    signal.timestamp,
+                    price,
+                    price,
+                    signal.timestamp,
+                    candle_end_ns,
+                },
+            );
+
             std.log.info("Opened simulated {s} {s} qty={d:.6} price=${d:.4}", .{ (if (side == .long) "LONG" else "SHORT"), signal.symbol_name, amount, price });
         }
     }
@@ -349,7 +404,7 @@ pub const PortfolioManager = struct {
         position_size_usdt: f64,
         order_id: ?i64,
     ) void {
-        // Use symbol_name directly as the hash-map key (no optional issues).
+        // Use symbol_name directly as the hash-map key.
         if (!self.positions.contains(signal.symbol_name)) {
             self.positions.put(signal.symbol_name, PortfolioPosition{
                 .symbol = signal.symbol_name,
@@ -379,9 +434,29 @@ pub const PortfolioManager = struct {
         pos.leverage = @floatCast(signal.leverage); // kept as-is; just for record
         pos.order_id = order_id;
 
-        if (self.trade_logger) |_| {
-            // Trade logging temporarily disabled to avoid mismatches with TradeLogger API.
-            // TODO: re-enable once TradeLogger has a matching log function.
+        // ✅ Log OPEN trade into CSV
+        if (self.trade_logger) |logger| {
+            const side_str: []const u8 = if (side == .long) "LONG" else "SHORT";
+
+            logger.logOpenTrade(
+                pos.entry_timestamp,          // event_time_ns
+                pos.symbol,                   // symbol
+                side_str,                     // side
+                TRADE_LEVERAGE,               // leverage
+                pos.amount,                   // amount
+                pos.position_size_usdt,       // position_size_usdt
+                self.fee_rate,                // fee_rate
+                pos.avg_entry_price,          // entry_price
+                pos.candle_start_timestamp,   // candle_start_ns
+                pos.candle_end_timestamp,     // candle_end_ns
+                pos.avg_entry_price,          // candle_open (approx)
+                pos.avg_entry_price,          // candle_high (approx)
+                pos.avg_entry_price,          // candle_low (approx)
+                pos.avg_entry_price,          // candle_close_at_entry
+                0.0,                          // pct_entry (can refine later)
+            ) catch |err| {
+                std.log.err("Failed to log OPEN trade for {s}: {}", .{ pos.symbol, err });
+            };
         }
     }
 
@@ -395,108 +470,134 @@ pub const PortfolioManager = struct {
 
     fn closeLong(self: *PortfolioManager, pos: *PortfolioPosition, price: f64) void {
         if (!pos.is_open or pos.side != .long) return;
+        const pnl = (price - pos.avg_entry_price) * pos.amount;
+        self.balance_usdt += pnl - (pos.amount * pos.avg_entry_price * self.fee_rate) - (pos.amount * price * self.fee_rate);
 
         if (self.binance_client.isLive()) {
-            const remote_qty = self.binance_client.fetchOpenPositionQty(pos.symbol, .long) catch |err| {
-                std.log.err("Failed to fetch open LONG qty for {s}: {}", .{ pos.symbol, err });
-                return;
-            };
-
-            const eps: f64 = 1e-9;
-            if (remote_qty <= eps) {
-                std.log.warn("No live LONG position on Binance for {s}; marking closed locally", .{ pos.symbol });
-                pos.is_open = false;
-                pos.side = .none;
-                pos.amount = 0.0;
-                return;
-            }
-
-            const pnl = (price - pos.avg_entry_price) * remote_qty;
-            const fee_open = remote_qty * pos.avg_entry_price * self.fee_rate;
-            const fee_close = remote_qty * price * self.fee_rate;
-            self.balance_usdt += pnl - fee_open - fee_close;
-
-            const order = self.binance_client.closeLong(pos.symbol, remote_qty) catch |err| {
+            const order = self.binance_client.closeLong(pos.symbol, pos.amount) catch |err| {
                 std.log.err("Failed to close LONG {s} on Binance: {}", .{ pos.symbol, err });
                 return;
             };
             defer self.binance_client.freeOrderResult(order);
-            std.log.info(
-                "Closed LONG on Binance {s} qty={d:.6} price=${d:.4}",
-                .{ pos.symbol, remote_qty, price },
-            );
-
-            pos.is_open = false;
-            pos.side = .none;
-            pos.amount = 0.0;
+            std.log.info("Closed LONG on Binance {s} orderId={} qty={d:.6} price=${d:.4}", .{ pos.symbol, order.order_id, pos.amount, price });
         } else {
-            const pnl = (price - pos.avg_entry_price) * pos.amount;
-            self.balance_usdt += pnl
-                - (pos.amount * pos.avg_entry_price * self.fee_rate)
-                - (pos.amount * price * self.fee_rate);
-
-            std.log.info(
-                "Closed simulated LONG {s} qty={d:.6} price=${d:.4} PnL=${d:.4}",
-                .{ pos.symbol, pos.amount, price, pnl },
-            );
-
-            pos.is_open = false;
-            pos.side = .none;
-            pos.amount = 0.0;
+            std.log.info("Closed simulated LONG {s} qty={d:.6} price=${d:.4} PnL=${d:.4}", .{ pos.symbol, pos.amount, price, pnl });
         }
+
+        // ✅ Log CLOSE trade into CSV
+        if (self.trade_logger) |logger| {
+            const side_str: []const u8 = "LONG";
+
+            const pct_exit: f64 = if (pos.avg_entry_price != 0.0)
+                (price - pos.avg_entry_price) / pos.avg_entry_price * 100.0
+            else
+                0.0;
+
+            logger.logCloseTrade(
+                std.time.nanoTimestamp(),     // event_time_ns
+                pos.symbol,                   // symbol
+                side_str,                     // side
+                TRADE_LEVERAGE,               // leverage
+                pos.amount,                   // amount
+                pos.position_size_usdt,       // position_size_usdt
+                self.fee_rate,                // fee_rate
+                pos.avg_entry_price,          // entry_price
+                price,                        // exit_price
+                pos.candle_start_timestamp,   // candle_start_ns
+                pos.candle_end_timestamp,     // candle_end_ns
+                pos.avg_entry_price,          // candle_open (approx)
+                pos.avg_entry_price,          // candle_high (approx)
+                pos.avg_entry_price,          // candle_low (approx)
+                price,                        // candle_close_at_exit
+                pnl,                          // pnl_usdt
+                0.0,                          // pct_entry
+                pct_exit,                     // pct_exit
+            ) catch |err| {
+                std.log.err("Failed to log CLOSE LONG trade for {s}: {}", .{ pos.symbol, err });
+            };
+        }
+
+        // 🌟 HUMAN-READABLE CLOSE LOG
+        std.log.info(
+            "Trade CLOSED for {s} (LONG): entry {d:.6}, exit {d:.6}, PnL={d:.4} USDT, timeframe [{d} - {d}]",
+            .{
+                pos.symbol,
+                pos.avg_entry_price,
+                price,
+                pnl,
+                pos.candle_start_timestamp,
+                pos.candle_end_timestamp,
+            },
+        );
+
+        pos.is_open = false;
+        pos.side = .none;
     }
 
     fn closeShort(self: *PortfolioManager, pos: *PortfolioPosition, price: f64) void {
         if (!pos.is_open or pos.side != .short) return;
+        const pnl = (pos.avg_entry_price - price) * pos.amount;
+        self.balance_usdt += pnl - (pos.amount * pos.avg_entry_price * self.fee_rate) - (pos.amount * price * self.fee_rate);
 
         if (self.binance_client.isLive()) {
-            const remote_qty = self.binance_client.fetchOpenPositionQty(pos.symbol, .short) catch |err| {
-                std.log.err("Failed to fetch open SHORT qty for {s}: {}", .{ pos.symbol, err });
-                return;
-            };
-
-            const eps: f64 = 1e-9;
-            if (remote_qty <= eps) {
-                std.log.warn("No live SHORT position on Binance for {s}; marking closed locally", .{ pos.symbol });
-                pos.is_open = false;
-                pos.side = .none;
-                pos.amount = 0.0;
-                return;
-            }
-
-            const pnl = (pos.avg_entry_price - price) * remote_qty;
-            const fee_open = remote_qty * pos.avg_entry_price * self.fee_rate;
-            const fee_close = remote_qty * price * self.fee_rate;
-            self.balance_usdt += pnl - fee_open - fee_close;
-
-            const order = self.binance_client.closeShort(pos.symbol, remote_qty) catch |err| {
+            const order = self.binance_client.closeShort(pos.symbol, pos.amount) catch |err| {
                 std.log.err("Failed to close SHORT {s} on Binance: {}", .{ pos.symbol, err });
                 return;
             };
             defer self.binance_client.freeOrderResult(order);
-            std.log.info(
-                "Closed SHORT on Binance {s} qty={d:.6} price=${d:.4}",
-                .{ pos.symbol, remote_qty, price },
-            );
-
-            pos.is_open = false;
-            pos.side = .none;
-            pos.amount = 0.0;
+            std.log.info("Closed SHORT on Binance {s} orderId={} qty={d:.6} price=${d:.4}", .{ pos.symbol, order.order_id, pos.amount, price });
         } else {
-            const pnl = (pos.avg_entry_price - price) * pos.amount;
-            self.balance_usdt += pnl
-                - (pos.amount * pos.avg_entry_price * self.fee_rate)
-                - (pos.amount * price * self.fee_rate);
-
-            std.log.info(
-                "Closed simulated SHORT {s} qty={d:.6} price=${d:.4} PnL=${d:.4}",
-                .{ pos.symbol, pos.amount, price, pnl },
-            );
-
-            pos.is_open = false;
-            pos.side = .none;
-            pos.amount = 0.0;
+            std.log.info("Closed simulated SHORT {s} qty={d:.6} price=${d:.4} PnL=${d:.4}", .{ pos.symbol, pos.amount, price, pnl });
         }
+
+        // ✅ Log CLOSE trade into CSV
+        if (self.trade_logger) |logger| {
+            const side_str: []const u8 = "SHORT";
+
+            const pct_exit: f64 = if (pos.avg_entry_price != 0.0)
+                (pos.avg_entry_price - price) / pos.avg_entry_price * 100.0
+            else
+                0.0;
+
+            logger.logCloseTrade(
+                std.time.nanoTimestamp(),     // event_time_ns
+                pos.symbol,                   // symbol
+                side_str,                     // side
+                TRADE_LEVERAGE,               // leverage
+                pos.amount,                   // amount
+                pos.position_size_usdt,       // position_size_usdt
+                self.fee_rate,                // fee_rate
+                pos.avg_entry_price,          // entry_price
+                price,                        // exit_price
+                pos.candle_start_timestamp,   // candle_start_ns
+                pos.candle_end_timestamp,     // candle_end_ns
+                pos.avg_entry_price,          // candle_open (approx)
+                pos.avg_entry_price,          // candle_high (approx)
+                pos.avg_entry_price,          // candle_low (approx)
+                price,                        // candle_close_at_exit
+                pnl,                          // pnl_usdt
+                0.0,                          // pct_entry
+                pct_exit,                     // pct_exit
+            ) catch |err| {
+                std.log.err("Failed to log CLOSE SHORT trade for {s}: {}", .{ pos.symbol, err });
+            };
+        }
+
+        // 🌟 HUMAN-READABLE CLOSE LOG
+        std.log.info(
+            "Trade CLOSED for {s} (SHORT): entry {d:.6}, exit {d:.6}, PnL={d:.4} USDT, timeframe [{d} - {d}]",
+            .{
+                pos.symbol,
+                pos.avg_entry_price,
+                price,
+                pnl,
+                pos.candle_start_timestamp,
+                pos.candle_end_timestamp,
+            },
+        );
+
+        pos.is_open = false;
+        pos.side = .none;
     }
 
     fn cleanupPositions(self: *PortfolioManager) void {
