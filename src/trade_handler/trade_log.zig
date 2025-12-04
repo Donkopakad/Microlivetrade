@@ -1,42 +1,23 @@
 const std = @import("std");
 
-// =============================================================================
-// Trade Logger
-// =============================================================================
-
 pub const TradeLogger = struct {
     allocator: std.mem.Allocator,
     file: std.fs.File,
 
-    // -------------------------------------------------------------------------
-    // TradeRow structure
-    // -------------------------------------------------------------------------
     pub const TradeRow = struct {
-        event_time_ns: i128,
-        event_type: []const u8,
+        trade_id: u64,
         symbol: []const u8,
         side: []const u8,
-        leverage: f64,
+        status: []const u8,
+        entry_time: i128,
+        close_time: ?i128,
+        open_price: f64,
+        close_price: f64,
         amount: f64,
-        position_size_usdt: f64,
-        fee_rate: f64,
-        entry_price: f64,
-        exit_price: f64,
-        candle_start_ns: i128,
-        candle_end_ns: i128,
-        candle_open: f64,
-        candle_high: f64,
-        candle_low: f64,
-        candle_close_at_entry: f64,
-        candle_close_at_exit: f64,
-        pnl_usdt: f64,
-        pct_entry: f64,
-        pct_exit: f64,
+        notional: f64,
+        pnl: f64,
     };
 
-    // -------------------------------------------------------------------------
-    // Initialize logger
-    // -------------------------------------------------------------------------
     pub fn init(allocator: std.mem.Allocator) !*TradeLogger {
         try std.fs.cwd().makePath("logs");
 
@@ -64,155 +45,120 @@ pub const TradeLogger = struct {
 
     pub fn deinit(self: *TradeLogger) void {
         self.file.close();
-        self.allocator.destroy(self);
     }
 
-    // -------------------------------------------------------------------------
-    // Header Writer
-    // -------------------------------------------------------------------------
     fn writeHeader(self: *TradeLogger) !void {
-        const header =
-            "event_time_utc,event_type,symbol,side,leverage,amount,position_size_usdt,"
-            ++ "fee_rate,entry_price,exit_price,candle_start_utc,candle_end_utc,"
-            ++ "candle_open,candle_high,candle_low,candle_close_at_entry,"
-            ++ "candle_close_at_exit,pnl_usdt,pct_entry,pct_exit\n";
-
+        const header = "trade_id,symbol,side,status,entry_time,close_time,open_price,close_price,amount,notional,pnl\n";
         try self.file.writeAll(header);
         try self.file.sync();
     }
 
-    // -------------------------------------------------------------------------
-    // PUBLIC: Log OPEN trade
-    // -------------------------------------------------------------------------
-    pub fn logOpenTrade(
+    pub fn logOpen(
         self: *TradeLogger,
-        event_time_ns: i128,
+        trade_id: u64,
         symbol: []const u8,
         side: []const u8,
-        leverage: f64,
+        entry_time: i128,
+        open_price: f64,
         amount: f64,
-        position_size_usdt: f64,
-        fee_rate: f64,
-        entry_price: f64,
-        candle_start_ns: i128,
-        candle_end_ns: i128,
-        candle_open: f64,
-        candle_high: f64,
-        candle_low: f64,
-        candle_close_at_entry: f64,
-        pct_entry: f64,
+        notional: f64,
     ) !void {
         const row = TradeRow{
-            .event_time_ns = event_time_ns,
-            .event_type = "open",
+            .trade_id = trade_id,
             .symbol = symbol,
             .side = side,
-            .leverage = leverage,
+            .status = "opened",
+            .entry_time = entry_time,
+            .close_time = null,
+            .open_price = open_price,
+            .close_price = 0.0,
             .amount = amount,
-            .position_size_usdt = position_size_usdt,
-            .fee_rate = fee_rate,
-            .entry_price = entry_price,
-            .exit_price = 0.0,
-            .candle_start_ns = candle_start_ns,
-            .candle_end_ns = candle_end_ns,
-            .candle_open = candle_open,
-            .candle_high = candle_high,
-            .candle_low = candle_low,
-            .candle_close_at_entry = candle_close_at_entry,
-            .candle_close_at_exit = candle_close_at_entry,
-            .pnl_usdt = 0.0,
-            .pct_entry = pct_entry,
-            .pct_exit = 0.0,
+            .notional = notional,
+            .pnl = 0.0,
         };
+
         try self.writeTradeRow(row);
     }
 
-    // -------------------------------------------------------------------------
-    // PUBLIC: Log CLOSE trade
-    // -------------------------------------------------------------------------
-    pub fn logCloseTrade(
+    pub fn logClose(
         self: *TradeLogger,
-        event_time_ns: i128,
+        trade_id: u64,
         symbol: []const u8,
         side: []const u8,
-        leverage: f64,
+        entry_time: i128,
+        close_time: i128,
+        open_price: f64,
+        close_price: f64,
         amount: f64,
-        position_size_usdt: f64,
-        fee_rate: f64,
-        entry_price: f64,
-        exit_price: f64,
-        candle_start_ns: i128,
-        candle_end_ns: i128,
-        candle_open: f64,
-        candle_high: f64,
-        candle_low: f64,
-        candle_close_at_exit: f64,
-        pnl_usdt: f64,
-        pct_entry: f64,
-        pct_exit: f64,
+        notional: f64,
+        pnl: f64,
     ) !void {
         const row = TradeRow{
-            .event_time_ns = event_time_ns,
-            .event_type = "close",
+            .trade_id = trade_id,
             .symbol = symbol,
             .side = side,
-            .leverage = leverage,
+            .status = "closed",
+            .entry_time = entry_time,
+            .close_time = close_time,
+            .open_price = open_price,
+            .close_price = close_price,
             .amount = amount,
-            .position_size_usdt = position_size_usdt,
-            .fee_rate = fee_rate,
-            .entry_price = entry_price,
-            .exit_price = exit_price,
-            .candle_start_ns = candle_start_ns,
-            .candle_end_ns = candle_end_ns,
-            .candle_open = candle_open,
-            .candle_high = candle_high,
-            .candle_low = candle_low,
-            .candle_close_at_entry = candle_open,
-            .candle_close_at_exit = candle_close_at_exit,
-            .pnl_usdt = pnl_usdt,
-            .pct_entry = pct_entry,
-            .pct_exit = pct_exit,
+            .notional = notional,
+            .pnl = pnl,
         };
+
         try self.writeTradeRow(row);
     }
 
-    // -------------------------------------------------------------------------
-    // Write a single CSV row
-    // -------------------------------------------------------------------------
+    pub fn logInvalidClose(
+        self: *TradeLogger,
+        trade_id: u64,
+        symbol: []const u8,
+        entry_time: i128,
+    ) !void {
+        const now_ts: i128 = @intCast(std.time.nanoTimestamp());
+        const row = TradeRow{
+            .trade_id = trade_id,
+            .symbol = symbol,
+            .side = "",
+            .status = "invalid_close",
+            .entry_time = entry_time,
+            .close_time = now_ts,
+            .open_price = 0.0,
+            .close_price = 0.0,
+            .amount = 0.0,
+            .notional = 0.0,
+            .pnl = 0.0,
+        };
+
+        try self.writeTradeRow(row);
+    }
+
     fn writeTradeRow(self: *TradeLogger, row: TradeRow) !void {
-        var buf1: [64]u8 = undefined;
-        var buf2: [64]u8 = undefined;
-        var buf3: [64]u8 = undefined;
+        var entry_buf: [64]u8 = undefined;
+        var close_buf: [64]u8 = undefined;
 
-        const t_event = try formatTimestamp(row.event_time_ns, &buf1);
-        const t_start = try formatTimestamp(row.candle_start_ns, &buf2);
-        const t_end = try formatTimestamp(row.candle_end_ns, &buf3);
+        const entry_time = try formatTimestamp(row.entry_time, &entry_buf);
+        const close_time = if (row.close_time) |ts|
+            try formatTimestamp(ts, &close_buf)
+        else
+            "";
 
         const w = self.file.writer();
-
         try w.print(
-            "{s},{s},{s},{s},{d},{d},{d},{d},{d},{d},{s},{s},{d},{d},{d},{d},{d},{d},{d},{d}\n",
+            "{d},{s},{s},{s},{s},{s},{d:.4},{d:.4},{d:.6},{d:.4},{d:.4}\n",
             .{
-                t_event,
-                row.event_type,
+                row.trade_id,
                 row.symbol,
                 row.side,
-                row.leverage,
+                row.status,
+                entry_time,
+                close_time,
+                row.open_price,
+                row.close_price,
                 row.amount,
-                row.position_size_usdt,
-                row.fee_rate,
-                row.entry_price,
-                row.exit_price,
-                t_start,
-                t_end,
-                row.candle_open,
-                row.candle_high,
-                row.candle_low,
-                row.candle_close_at_entry,
-                row.candle_close_at_exit,
-                row.pnl_usdt,
-                row.pct_entry,
-                row.pct_exit,
+                row.notional,
+                row.pnl,
             },
         );
 
@@ -220,9 +166,6 @@ pub const TradeLogger = struct {
     }
 };
 
-// =============================================================================
-// Timestamp formatter — Zig 0.14.0 compatible
-// =============================================================================
 pub fn formatTimestamp(timestamp_ns: i128, buffer: *[64]u8) ![]const u8 {
     const secs: i128 = @divFloor(timestamp_ns, 1_000_000_000);
     return try std.fmt.bufPrint(buffer, "{d}", .{secs});
