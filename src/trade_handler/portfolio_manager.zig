@@ -395,42 +395,108 @@ pub const PortfolioManager = struct {
 
     fn closeLong(self: *PortfolioManager, pos: *PortfolioPosition, price: f64) void {
         if (!pos.is_open or pos.side != .long) return;
-        const pnl = (price - pos.avg_entry_price) * pos.amount;
-        self.balance_usdt += pnl - (pos.amount * pos.avg_entry_price * self.fee_rate) - (pos.amount * price * self.fee_rate);
 
         if (self.binance_client.isLive()) {
-            const order = self.binance_client.closeLong(pos.symbol, pos.amount) catch |err| {
+            const remote_qty = self.binance_client.fetchOpenPositionQty(pos.symbol, .long) catch |err| {
+                std.log.err("Failed to fetch open LONG qty for {s}: {}", .{ pos.symbol, err });
+                return;
+            };
+
+            const eps: f64 = 1e-9;
+            if (remote_qty <= eps) {
+                std.log.warn("No live LONG position on Binance for {s}; marking closed locally", .{ pos.symbol });
+                pos.is_open = false;
+                pos.side = .none;
+                pos.amount = 0.0;
+                return;
+            }
+
+            const pnl = (price - pos.avg_entry_price) * remote_qty;
+            const fee_open = remote_qty * pos.avg_entry_price * self.fee_rate;
+            const fee_close = remote_qty * price * self.fee_rate;
+            self.balance_usdt += pnl - fee_open - fee_close;
+
+            const order = self.binance_client.closeLong(pos.symbol, remote_qty) catch |err| {
                 std.log.err("Failed to close LONG {s} on Binance: {}", .{ pos.symbol, err });
                 return;
             };
             defer self.binance_client.freeOrderResult(order);
-            std.log.info("Closed LONG on Binance {s} orderId={} qty={d:.6} price=${d:.4}", .{ pos.symbol, order.order_id, pos.amount, price });
-        } else {
-            std.log.info("Closed simulated LONG {s} qty={d:.6} price=${d:.4} PnL=${d:.4}", .{ pos.symbol, pos.amount, price, pnl });
-        }
+            std.log.info(
+                "Closed LONG on Binance {s} qty={d:.6} price=${d:.4}",
+                .{ pos.symbol, remote_qty, price },
+            );
 
-        pos.is_open = false;
-        pos.side = .none;
+            pos.is_open = false;
+            pos.side = .none;
+            pos.amount = 0.0;
+        } else {
+            const pnl = (price - pos.avg_entry_price) * pos.amount;
+            self.balance_usdt += pnl
+                - (pos.amount * pos.avg_entry_price * self.fee_rate)
+                - (pos.amount * price * self.fee_rate);
+
+            std.log.info(
+                "Closed simulated LONG {s} qty={d:.6} price=${d:.4} PnL=${d:.4}",
+                .{ pos.symbol, pos.amount, price, pnl },
+            );
+
+            pos.is_open = false;
+            pos.side = .none;
+            pos.amount = 0.0;
+        }
     }
 
     fn closeShort(self: *PortfolioManager, pos: *PortfolioPosition, price: f64) void {
         if (!pos.is_open or pos.side != .short) return;
-        const pnl = (pos.avg_entry_price - price) * pos.amount;
-        self.balance_usdt += pnl - (pos.amount * pos.avg_entry_price * self.fee_rate) - (pos.amount * price * self.fee_rate);
 
         if (self.binance_client.isLive()) {
-            const order = self.binance_client.closeShort(pos.symbol, pos.amount) catch |err| {
+            const remote_qty = self.binance_client.fetchOpenPositionQty(pos.symbol, .short) catch |err| {
+                std.log.err("Failed to fetch open SHORT qty for {s}: {}", .{ pos.symbol, err });
+                return;
+            };
+
+            const eps: f64 = 1e-9;
+            if (remote_qty <= eps) {
+                std.log.warn("No live SHORT position on Binance for {s}; marking closed locally", .{ pos.symbol });
+                pos.is_open = false;
+                pos.side = .none;
+                pos.amount = 0.0;
+                return;
+            }
+
+            const pnl = (pos.avg_entry_price - price) * remote_qty;
+            const fee_open = remote_qty * pos.avg_entry_price * self.fee_rate;
+            const fee_close = remote_qty * price * self.fee_rate;
+            self.balance_usdt += pnl - fee_open - fee_close;
+
+            const order = self.binance_client.closeShort(pos.symbol, remote_qty) catch |err| {
                 std.log.err("Failed to close SHORT {s} on Binance: {}", .{ pos.symbol, err });
                 return;
             };
             defer self.binance_client.freeOrderResult(order);
-            std.log.info("Closed SHORT on Binance {s} orderId={} qty={d:.6} price=${d:.4}", .{ pos.symbol, order.order_id, pos.amount, price });
-        } else {
-            std.log.info("Closed simulated SHORT {s} qty={d:.6} price=${d:.4} PnL=${d:.4}", .{ pos.symbol, pos.amount, price, pnl });
-        }
+            std.log.info(
+                "Closed SHORT on Binance {s} qty={d:.6} price=${d:.4}",
+                .{ pos.symbol, remote_qty, price },
+            );
 
-        pos.is_open = false;
-        pos.side = .none;
+            pos.is_open = false;
+            pos.side = .none;
+            pos.amount = 0.0;
+        } else {
+            const pnl = (pos.avg_entry_price - price) * pos.amount;
+            self.balance_usdt += pnl
+                - (pos.amount * pos.avg_entry_price * self.fee_rate)
+                - (pos.amount * price * self.fee_rate);
+
+            std.log.info(
+                "Closed simulated SHORT {s} qty={d:.6} price=${d:.4} PnL=${d:.4}",
+                .{ pos.symbol, pos.amount, price, pnl },
+            );
+
+            pos.is_open = false;
+            pos.side = .none;
+            pos.amount = 0.0;
+        }
     }
 
     fn cleanupPositions(self: *PortfolioManager) void {
