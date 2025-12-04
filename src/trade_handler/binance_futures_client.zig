@@ -59,7 +59,7 @@ pub const BinanceFuturesClient = struct {
 
         if (!client.enabled) {
             client.dry_run_reason = try allocator.dupe(u8, "Missing BINANCE_FUTURES_API_KEY or BINANCE_FUTURES_API_SECRET");
-            std.log.err("Live Binance futures trading disabled: {s}", .{client.dry_run_reason.?});
+            std.log.err("Live Binance futures trading disabled: {s}", .{ client.dry_run_reason.? });
         }
 
         return client;
@@ -101,67 +101,6 @@ pub const BinanceFuturesClient = struct {
         return null;
     }
 
-    /// NEW: Return the current open position quantity for a given symbol + side.
-    /// If there is no open position, returns 0.0.
-    pub fn fetchOpenPositionQty(
-        self: *BinanceFuturesClient,
-        symbol: []const u8,
-        side: PositionSide,
-    ) !f64 {
-        if (!self.enabled) return 0.0;
-
-        var query_buf = std.ArrayList(u8).init(self.allocator);
-        defer query_buf.deinit();
-        try query_buf.writer().print("symbol={s}", .{ symbol });
-
-        // /fapi/v2/positionRisk returns an array of positions
-        const body = try self.signedRequest(.GET, "/fapi/v2/positionRisk", query_buf.items);
-        defer self.allocator.free(body);
-
-        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, body, .{});
-        defer parsed.deinit();
-
-        const root = parsed.value;
-        if (root != .array) return error.ParseError;
-
-        var qty: f64 = 0.0;
-
-        for (root.array.items) |pos_val| {
-            if (pos_val != .object) continue;
-            const obj = pos_val.object;
-
-            const sym_val = obj.get("symbol") orelse continue;
-            if (sym_val != .string) continue;
-            if (!std.mem.eql(u8, sym_val.string, symbol)) continue;
-
-            // Hedge-mode: positionSide = "LONG" / "SHORT"
-            if (obj.get("positionSide")) |ps_val| {
-                if (ps_val != .string) continue;
-
-                const want_side = switch (side) {
-                    .long => "LONG",
-                    .short => "SHORT",
-                };
-
-                if (!std.mem.eql(u8, ps_val.string, want_side)) continue;
-            } else {
-                // One-way mode: we will just use the sign of positionAmt below.
-            }
-
-            const amt_val = obj.get("positionAmt") orelse continue;
-            const raw_amt: f64 = switch (amt_val) {
-                .string => |s| std.fmt.parseFloat(f64, s) catch 0.0,
-                .float => |f| f,
-                else => 0.0,
-            };
-
-            qty = @fabs(raw_amt);
-            break;
-        }
-
-        return qty;
-    }
-
     pub fn setMarginType(self: *BinanceFuturesClient, symbol: []const u8, margin_type: []const u8) !void {
         if (!self.enabled) return;
         var query_buf = std.ArrayList(u8).init(self.allocator);
@@ -185,6 +124,58 @@ pub const BinanceFuturesClient = struct {
         };
         defer self.allocator.free(body);
     }
+
+    // ------------------------------------------------------------------------
+    // NEW: fetch open position quantity for LONG / SHORT on a symbol
+    // ------------------------------------------------------------------------
+    pub fn fetchOpenPositionQty(
+        self: *BinanceFuturesClient,
+        symbol: []const u8,
+        position_side: PositionSide,
+    ) !f64 {
+        if (!self.enabled) return 0.0;
+
+        // Use positionRisk; we filter by symbol+positionSide
+        const body = try self.signedRequest(.GET, "/fapi/v2/positionRisk", "");
+        defer self.allocator.free(body);
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, body, .{});
+        defer parsed.deinit();
+
+        const root = parsed.value;
+        if (root != .array) return 0.0;
+
+        const target_side_str = switch (position_side) {
+            .long => "LONG",
+            .short => "SHORT",
+        };
+
+        for (root.array.items) |item| {
+            if (item != .object) continue;
+            const obj = item.object;
+
+            const sym_val = obj.get("symbol") orelse continue;
+            if (sym_val != .string) continue;
+            if (!std.mem.eql(u8, sym_val.string, symbol)) continue;
+
+            const side_val = obj.get("positionSide") orelse continue;
+            if (side_val != .string) continue;
+            if (!std.mem.eql(u8, side_val.string, target_side_str)) continue;
+
+            const amt_val = obj.get("positionAmt") orelse continue;
+            if (amt_val != .string) continue;
+
+            const raw_amt = std.fmt.parseFloat(f64, amt_val.string) catch 0.0;
+            // Shorts come back as negative; we always want absolute quantity.
+            return @abs(raw_amt);
+        }
+
+        return 0.0;
+    }
+
+    // ------------------------------------------------------------------------
+    // Public trading helpers
+    // ------------------------------------------------------------------------
 
     pub fn openLong(self: *BinanceFuturesClient, symbol: []const u8, usdt_notional: f64, leverage: f64) !OrderResult {
         return self.placeOrderWithNotional(symbol, usdt_notional, leverage, .buy, .long, false);
@@ -218,7 +209,7 @@ pub const BinanceFuturesClient = struct {
         return self.placeOrderWithQuantity(symbol, qty, side, position_side, reduce_only);
     }
 
-        fn placeOrderWithQuantity(
+    fn placeOrderWithQuantity(
         self: *BinanceFuturesClient,
         symbol: []const u8,
         quantity: f64,
@@ -245,7 +236,7 @@ pub const BinanceFuturesClient = struct {
             .short => "SHORT",
         };
 
-        // ❌ No reduceOnly parameter sent to Binance anymore.
+        // NOTE: We do NOT send reduceOnly parameter anymore.
         try query_buf.writer().print(
             "symbol={s}&side={s}&type=MARKET&positionSide={s}&quantity={d:.8}&newClientOrderId={s}",
             .{ symbol, side_str, position_side_str, norm_qty, client_order_id },
@@ -339,20 +330,17 @@ pub const BinanceFuturesClient = struct {
         self.allocator.free(result.status);
     }
 
-        fn normalizeQuantity(self: *BinanceFuturesClient, symbol: []const u8, quantity: f64, price: f64) !f64 {
+    fn normalizeQuantity(self: *BinanceFuturesClient, symbol: []const u8, quantity: f64, price: f64) !f64 {
         const info = try self.ensureSymbolInfo(symbol);
         const step = info.step_size;
         if (step <= 0) return error.InvalidStepSize;
 
-        // ---- FIX: more robust step rounding ----
-        // Work in "number of steps" space and add a tiny epsilon so that
-        // 12.9 / 0.1 = 128.999999... still becomes 129, not 128.
+        // Work in "number of steps" and add small epsilon to avoid 128.99999 → 128
         const steps_raw = quantity / step;
         const eps = 1e-9;
         const steps = std.math.floor(steps_raw + eps);
 
         const adjusted_qty = steps * step;
-        // ----------------------------------------
 
         if (adjusted_qty <= 0) return error.InvalidQuantity;
         if ((adjusted_qty * price) < info.min_notional or adjusted_qty < info.min_qty) {
@@ -362,8 +350,6 @@ pub const BinanceFuturesClient = struct {
         const precision_width: usize = @intCast(info.quantity_precision);
         const pow10 = std.math.pow(f64, 10, @floatFromInt(precision_width));
 
-        // Round to the symbol's precision (not just floor) – adjusted_qty is already
-        // an exact multiple of step, so this won't overshoot.
         const rounded = std.math.round(adjusted_qty * pow10) / pow10;
 
         return rounded;
@@ -532,7 +518,7 @@ pub const BinanceFuturesClient = struct {
         mac.update(query);
         var digest: [32]u8 = undefined;
         mac.final(&digest);
-        return std.fmt.bufPrint(out_buf, "{s}", .{std.fmt.fmtSliceHexLower(&digest)});
+        return std.fmt.bufPrint(out_buf, "{s}", .{ std.fmt.fmtSliceHexLower(&digest) });
     }
 
     fn logBinanceError(self: *BinanceFuturesClient, path: []const u8, body: []const u8) void {
@@ -547,11 +533,21 @@ pub const BinanceFuturesClient = struct {
         if (code_val != null or msg_val != null) {
             if (code_val) |cv| {
                 switch (cv) {
-                    .integer => std.log.err("Binance error {s}: code {d} msg {s}", .{ path, cv.integer, if (msg_val != null and msg_val.? == .string) msg_val.?.string else "" }),
-                    else => std.log.err("Binance error {s}: msg {s}", .{ path, if (msg_val != null and msg_val.? == .string) msg_val.?.string else "" }),
+                    .integer => std.log.err("Binance error {s}: code {d} msg {s}", .{
+                        path,
+                        cv.integer,
+                        if (msg_val != null and msg_val.? == .string) msg_val.?.string else "",
+                    }),
+                    else => std.log.err("Binance error {s}: msg {s}", .{
+                        path,
+                        if (msg_val != null and msg_val.? == .string) msg_val.?.string else "",
+                    }),
                 }
             } else {
-                std.log.err("Binance error {s}: msg {s}", .{ path, if (msg_val != null and msg_val.? == .string) msg_val.?.string else "" });
+                std.log.err("Binance error {s}: msg {s}", .{
+                    path,
+                    if (msg_val != null and msg_val.? == .string) msg_val.?.string else "",
+                });
             }
         }
     }
