@@ -101,6 +101,67 @@ pub const BinanceFuturesClient = struct {
         return null;
     }
 
+    /// NEW: Return the current open position quantity for a given symbol + side.
+    /// If there is no open position, returns 0.0.
+    pub fn fetchOpenPositionQty(
+        self: *BinanceFuturesClient,
+        symbol: []const u8,
+        side: PositionSide,
+    ) !f64 {
+        if (!self.enabled) return 0.0;
+
+        var query_buf = std.ArrayList(u8).init(self.allocator);
+        defer query_buf.deinit();
+        try query_buf.writer().print("symbol={s}", .{ symbol });
+
+        // /fapi/v2/positionRisk returns an array of positions
+        const body = try self.signedRequest(.GET, "/fapi/v2/positionRisk", query_buf.items);
+        defer self.allocator.free(body);
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, body, .{});
+        defer parsed.deinit();
+
+        const root = parsed.value;
+        if (root != .array) return error.ParseError;
+
+        var qty: f64 = 0.0;
+
+        for (root.array.items) |pos_val| {
+            if (pos_val != .object) continue;
+            const obj = pos_val.object;
+
+            const sym_val = obj.get("symbol") orelse continue;
+            if (sym_val != .string) continue;
+            if (!std.mem.eql(u8, sym_val.string, symbol)) continue;
+
+            // Hedge-mode: positionSide = "LONG" / "SHORT"
+            if (obj.get("positionSide")) |ps_val| {
+                if (ps_val != .string) continue;
+
+                const want_side = switch (side) {
+                    .long => "LONG",
+                    .short => "SHORT",
+                };
+
+                if (!std.mem.eql(u8, ps_val.string, want_side)) continue;
+            } else {
+                // One-way mode: we will just use the sign of positionAmt below.
+            }
+
+            const amt_val = obj.get("positionAmt") orelse continue;
+            const raw_amt: f64 = switch (amt_val) {
+                .string => |s| std.fmt.parseFloat(f64, s) catch 0.0,
+                .float => |f| f,
+                else => 0.0,
+            };
+
+            qty = @fabs(raw_amt);
+            break;
+        }
+
+        return qty;
+    }
+
     pub fn setMarginType(self: *BinanceFuturesClient, symbol: []const u8, margin_type: []const u8) !void {
         if (!self.enabled) return;
         var query_buf = std.ArrayList(u8).init(self.allocator);
