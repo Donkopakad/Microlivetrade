@@ -1,66 +1,74 @@
 const std = @import("std");
+const ERR = @import("../errors.zig");
+const types = @import("../types.zig");
+const DeviceInfo = types.DeviceInfo;
+const GPUOHLCDataBatch = types.GPUOHLCDataBatch;
+const GPUPercentageChangeDeviceBatch = types.GPUPercentageChangeDeviceBatch;
 
-/// Simple error object used by the CUDA wrapper.
-pub const KernelError = struct {
-    code: i32,
-    message: []const u8,
-};
+pub const KERNEL_SUCCESS = ERR.KernelError{ .code = 0, .message = "Success" };
 
-/// Fake device info – enough for logging.
-pub const DeviceInfo = struct {
-    name: [64]u8,
-    compute_capability_major: i32,
-    compute_capability_minor: i32,
-    total_global_mem: u64,
-};
-
-/// Opaque GPU batch types – we don't use real CUDA on this pod.
-pub const GPUOHLCDataBatch = opaque {};
-pub const GPUOHLCDataBatch_C = opaque {};
-
-/// Namespace for "CUDA" operations. In this stub implementation we
-/// always behave as if there are **0 CUDA devices**, so the rest of the
-/// code will switch to the CPU fallback path (which you already saw in
-/// the logs: "No CUDA devices detected; using CPU fallback").
 pub const CudaWrapper = struct {
-    /// Called by selectBestCUDADevice() in lib.zig
-    pub fn getDeviceCount(out_count: *i32) KernelError {
-        // No CUDA devices -> CPU fallback
-        out_count.* = 0;
-        return KernelError{ .code = 0, .message = "OK" };
+    fn success() ERR.KernelError {
+        return KERNEL_SUCCESS;
     }
 
-    /// Also used by lib.zig for logging device info.
-    /// We just fill in a fake "CPU Fallback Device".
-    pub fn getDeviceInfo(device_index: i32, info: *DeviceInfo) KernelError {
-        _ = device_index;
+    pub fn initDevice(device_id: c_int) ERR.KernelError {
+        _ = device_id;
+        return success();
+    }
 
+    pub fn resetDevice() ERR.KernelError {
+        return success();
+    }
+
+    pub fn getDeviceCount(count: *c_int) ERR.KernelError {
+        count.* = 0;
+        return success();
+    }
+
+    pub fn getDeviceInfo(device_id: c_int, info: *DeviceInfo) ERR.KernelError {
+        _ = device_id;
         info.* = DeviceInfo{
-            .name = undefined,
-            .compute_capability_major = 0,
-            .compute_capability_minor = 0,
-            .total_global_mem = 0,
+            .name = [_]u8{0} ** 256,
+            .major = 0,
+            .minor = 0,
+            .totalGlobalMem = 0,
         };
-
         const label = "CPU Fallback Device";
-        var i: usize = 0;
-        while (i < label.len and i < info.name.len) : (i += 1) {
-            info.name[i] = label[i];
-        }
-        if (i < info.name.len) info.name[i] = 0; // C-style terminator
-
-        return KernelError{ .code = 0, .message = "OK" };
+        const len = @min(label.len, info.name.len - 1);
+        @memcpy(info.name[0..len], label[0..len]);
+        return success();
     }
 
-    /// These are placeholders in case lib.zig or other files declare them.
-    /// They do nothing but return success so that everything compiles.
-    pub fn initOHLCBatch(batch: *GPUOHLCDataBatch, max_symbols: usize) KernelError {
-        _ = batch;
-        _ = max_symbols;
-        return KernelError{ .code = 0, .message = "OK" };
+    pub fn selectBestDevice(best_device_id: *c_int) ERR.KernelError {
+        best_device_id.* = 0;
+        return success();
     }
 
-    pub fn freeOHLCBatch(batch: *GPUOHLCDataBatch) void {
-        _ = batch;
+    pub fn allocateMemory(d_ohlc_batch: **GPUOHLCDataBatch, d_pct_result: **GPUPercentageChangeDeviceBatch) ERR.KernelError {
+        d_ohlc_batch.*.* = std.mem.zeroes(GPUOHLCDataBatch);
+        d_pct_result.*.* = std.mem.zeroes(GPUPercentageChangeDeviceBatch);
+        return success();
+    }
+
+    pub fn freeMemory(d_ohlc_batch: ?*GPUOHLCDataBatch, d_pct_result: ?*GPUPercentageChangeDeviceBatch) ERR.KernelError {
+        _ = d_ohlc_batch;
+        _ = d_pct_result;
+        return success();
+    }
+
+    pub fn runPercentageChangeBatch(
+        d_ohlc_batch_ptr: *GPUOHLCDataBatch,
+        d_pct_results_ptr: *GPUPercentageChangeDeviceBatch,
+        h_ohlc_batch: *const GPUOHLCDataBatch,
+        h_pct_results: *GPUPercentageChangeDeviceBatch,
+        num_symbols: c_int,
+    ) ERR.KernelError {
+        _ = d_ohlc_batch_ptr;
+        _ = d_pct_results_ptr;
+        _ = h_ohlc_batch;
+        _ = h_pct_results;
+        _ = num_symbols;
+        return success();
     }
 };
