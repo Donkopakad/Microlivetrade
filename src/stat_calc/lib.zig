@@ -1,61 +1,47 @@
 const std = @import("std");
-const cuda_lib = @import("kernel.zig");
-const types = @import("../types.zig");
-const errors = @import("../errors.zig");
 const SymbolMap = @import("../symbol-map.zig").SymbolMap;
+const types = @import("../types.zig");
 const Symbol = types.Symbol;
 const OHLC = types.OHLC;
-
-pub const MAX_SYMBOLS: usize = 256;
-
-const KernelError = cuda_lib.KernelError;
-const CudaWrapper = cuda_lib.CudaWrapper;
-const DeviceInfo = cuda_lib.DeviceInfo;
-const GPUOHLCDataBatch = cuda_lib.GPUOHLCDataBatch;
-const GPUOHLCDataBatch_C = cuda_lib.GPUOHLCDataBatch_C;
-const GPUPercentageChangeResultBatch = types.GPUPercentageChangeResultBatch;
+const ERR = @import("../errors.zig");
+const kernel = @import("kernel.zig");
+const StatCalcError = ERR.StatCalcError;
+const DeviceInfo = types.DeviceInfo;
+const GPUOHLCDataBatch = types.GPUOHLCDataBatch;
 const GPUPercentageChangeDeviceBatch = types.GPUPercentageChangeDeviceBatch;
+const GPUPercentageChangeResultBatch = types.GPUPercentageChangeResultBatch;
+const MAX_SYMBOLS = types.MAX_SYMBOLS;
 const GPUBatchResult = types.GPUBatchResult;
-const StatCalcError = errors.StatCalcError;
+const CudaWrapper = kernel.CudaWrapper;
+const KERNEL_SUCCESS = kernel.KERNEL_SUCCESS;
 
-pub fn selectBestCUDADevice() !i32 {
-    var device_count: i32 = 0;
-    const kerr = CudaWrapper.getDeviceCount(&device_count);
-    if (kerr.code != 0) {
-        std.log.warn("Failed to get CUDA device count: {} ({s}); defaulting to device 0", .{ kerr.code, kerr.message });
+pub fn selectBestCUDADevice() !c_int {
+    var best_device_id: c_int = 0;
+    var device_count: c_int = 0;
+
+    const count_err = CudaWrapper.getDeviceCount(&device_count);
+    if (count_err.code != 0) {
+        std.log.warn("Failed to query CUDA devices (fallback to CPU): {s}", .{count_err.message});
         return 0;
     }
 
     if (device_count == 0) {
-        std.log.warn("No CUDA devices found; defaulting to device 0", .{});
+        std.log.warn("No CUDA devices detected; using CPU fallback", .{});
         return 0;
     }
 
-    var best_device: i32 = 0;
-    var max_compute_capability: i32 = -1;
-    var i: i32 = 0;
-    while (i < device_count) : (i += 1) {
-        var props: cuda_lib.CUDADeviceProperties = undefined;
-        const err = CudaWrapper.getDeviceProperties(i, &props);
-        if (err.code != 0) {
-            std.log.warn("Failed to get properties for device {}: {} ({s})", .{ i, err.code, err.message });
-            continue;
-        }
-
-        const compute_capability = props.major * 10 + props.minor;
-        if (compute_capability > max_compute_capability) {
-            max_compute_capability = compute_capability;
-            best_device = i;
-        }
+    const select_err = CudaWrapper.selectBestDevice(&best_device_id);
+    if (select_err.code != 0) {
+        std.log.warn("Failed to select CUDA device (fallback to CPU): {s}", .{select_err.message});
+        return 0;
     }
 
-    std.log.info("Selected CUDA device {} with compute capability {}", .{ best_device, max_compute_capability });
-    return best_device;
+    return best_device_id;
 }
 
 pub const StatCalc = struct {
     allocator: std.mem.Allocator,
-    device_id: i32,
+    device_id: c_int,
     gpu_enabled: bool,
 
     d_ohlc_batch: ?*GPUOHLCDataBatch,
@@ -63,44 +49,36 @@ pub const StatCalc = struct {
 
     h_pct_device: GPUPercentageChangeDeviceBatch,
 
-    pub fn init(allocator: std.mem.Allocator, device_id: i32) !StatCalc {
-        var self = StatCalc{
+    pub fn init(allocator: std.mem.Allocator, device_id: c_int) !StatCalc {
+        var calc = StatCalc{
             .allocator = allocator,
             .device_id = device_id,
             .gpu_enabled = false,
-
             .d_ohlc_batch = null,
             .d_pct_result = null,
-
             .h_pct_device = std.mem.zeroes(GPUPercentageChangeDeviceBatch),
         };
 
-        self.initCUDADevice() catch |err| {
-            _ = err;
-            std.log.warn("Falling back to CPU calculations due to CUDA init failure", .{});
-            return self;
-        };
+        try calc.initCUDADevice();
+        try calc.allocateDeviceMemory();
 
-        self.allocateDeviceMemory() catch |err| {
-            _ = err;
-            std.log.warn("Falling back to CPU calculations due to CUDA memory allocation failure", .{});
-            self.gpu_enabled = false;
-            return self;
-        };
-
-        return self;
+        return calc;
     }
 
     pub fn deinit(self: *StatCalc) void {
-        if (self.gpu_enabled) {
-            _ = CudaWrapper.freeMemory(self.d_ohlc_batch, self.d_pct_result);
-        }
-
         if (self.d_ohlc_batch) |ptr| {
             self.allocator.destroy(ptr);
         }
         if (self.d_pct_result) |ptr| {
             self.allocator.destroy(ptr);
+        }
+
+        self.d_ohlc_batch = null;
+        self.d_pct_result = null;
+
+        const reset_err = CudaWrapper.resetDevice();
+        if (reset_err.code != 0) {
+            std.log.warn("CUDA device reset failed via wrapper: {} ({s})", .{ reset_err.code, reset_err.message });
         }
     }
 
