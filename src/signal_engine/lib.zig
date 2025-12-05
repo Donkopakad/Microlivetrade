@@ -127,7 +127,7 @@ pub const SignalEngine = struct {
 
             if (pct >= engine_types.BUY_THRESHOLD) {
                 std.log.info(
-                    "Exact percentage increase signal for {s}: pct={d:+.2}% inside timeframe {d} -> {d}, at {d}, calculated with open={d:.4} vs current={d:.4}. Trade start time will be {d} and will be closed at {d}.",
+                    ""Exact percentage increase signal for {s}: pct={d:.2}% inside timeframe {d} -> {d}, at {d}, calculated with open={d:.4} vs current={d:.4}. Trade start time will be {d} and will be closed at {d}.",
                     .{ symbol_name, pct, candle_start_ns, candle_end_ns, now_ts, open_price, current_price, candle_start_ns, candle_end_ns },
                 );
                 const signal = TradingSignal{
@@ -142,7 +142,7 @@ pub const SignalEngine = struct {
                 try self.trade_handler.addSignal(signal);
             } else if (pct <= engine_types.SELL_THRESHOLD) {
                 std.log.info(
-                    "Exact percentage decrease signal for {s}: pct={d:+.2}% inside timeframe {d} -> {d}, at {d}, calculated with open={d:.4} vs current={d:.4}. Trade start time will be {d} and will be closed at {d}.",
+                    ""Exact percentage decrease signal for {s}: pct={d:.2}% inside timeframe {d} -> {d}, at {d}, calculated with open={d:.4} vs current={d:.4}. Trade start time will be {d} and will be closed at {d}.",
                     .{ symbol_name, pct, candle_start_ns, candle_end_ns, now_ts, open_price, current_price, candle_start_ns, candle_end_ns },
                 );
                 const signal = TradingSignal{
