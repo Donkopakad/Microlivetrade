@@ -52,13 +52,19 @@ const CudaWrapper = struct {
         return success();
     }
 
-    fn allocateMemory(d_ohlc_batch: **GPUOHLCDataBatch, d_pct_result: **GPUPercentageChangeDeviceBatch) ERR.KernelError {
+    fn allocateMemory(
+        d_ohlc_batch: **GPUOHLCDataBatch,
+        d_pct_result: **GPUPercentageChangeDeviceBatch,
+    ) ERR.KernelError {
         d_ohlc_batch.*.* = std.mem.zeroes(GPUOHLCDataBatch);
         d_pct_result.*.* = std.mem.zeroes(GPUPercentageChangeDeviceBatch);
         return success();
     }
 
-    fn freeMemory(d_ohlc_batch: ?*GPUOHLCDataBatch, d_pct_result: ?*GPUPercentageChangeDeviceBatch) ERR.KernelError {
+    fn freeMemory(
+        d_ohlc_batch: ?*GPUOHLCDataBatch,
+        d_pct_result: ?*GPUPercentageChangeDeviceBatch,
+    ) ERR.KernelError {
         _ = d_ohlc_batch;
         _ = d_pct_result;
         return success();
@@ -116,6 +122,10 @@ pub const StatCalc = struct {
     // the synthetic 15m bucket & open per index between calls.
     h_pct_device: GPUPercentageChangeDeviceBatch,
 
+    // First 15-minute synthetic candle from which we are allowed to trade.
+    // All buckets before this will return pct = 0.0 so no trades fire.
+    trading_start_bucket_ms: i64,
+
     pub fn init(allocator: std.mem.Allocator, device_id: c_int) !StatCalc {
         var calc = StatCalc{
             .allocator = allocator,
@@ -124,7 +134,21 @@ pub const StatCalc = struct {
             .d_ohlc_batch = null,
             .d_pct_result = null,
             .h_pct_device = std.mem.zeroes(GPUPercentageChangeDeviceBatch),
+            .trading_start_bucket_ms = 0,
         };
+
+        // Decide from which synthetic 15m candle we are allowed to trade.
+        // If you start the bot at 12:07, current_bucket = 12:00 and
+        // trading_start_bucket_ms = 12:15.
+        const now_ms: i64 = @intCast(@divTrunc(std.time.nanoTimestamp(), 1_000_000));
+        const current_bucket_idx: i64 = @divTrunc(now_ms, 900_000);
+        const current_bucket_ms: i64 = current_bucket_idx * 900_000;
+        calc.trading_start_bucket_ms = current_bucket_ms + 900_000;
+
+        std.log.info(
+            "StatCalc: trading will start from 15m window starting at {d} ms",
+            .{calc.trading_start_bucket_ms},
+        );
 
         try calc.initCUDADevice();
         try calc.allocateDeviceMemory();
@@ -145,14 +169,20 @@ pub const StatCalc = struct {
 
         const reset_err = CudaWrapper.resetDevice();
         if (reset_err.code != 0) {
-            std.log.warn("CUDA device reset failed via wrapper: {} ({s})", .{ reset_err.code, reset_err.message });
+            std.log.warn(
+                "CUDA device reset failed via wrapper: {} ({s})",
+                .{ reset_err.code, reset_err.message },
+            );
         }
     }
 
     fn initCUDADevice(self: *StatCalc) !void {
         const init_err = CudaWrapper.initDevice(self.device_id);
         if (init_err.code != 0) {
-            std.log.warn("Failed to initialize CUDA device (CPU fallback): {} ({s})", .{ init_err.code, init_err.message });
+            std.log.warn(
+                "Failed to initialize CUDA device (CPU fallback): {} ({s})",
+                .{ init_err.code, init_err.message },
+            );
             self.gpu_enabled = false;
             return;
         }
@@ -160,7 +190,10 @@ pub const StatCalc = struct {
         var info: DeviceInfo = undefined;
         const info_err = CudaWrapper.getDeviceInfo(self.device_id, &info);
         if (info_err.code != 0) {
-            std.log.warn("Failed to get device info via wrapper: {} ({s})", .{ info_err.code, info_err.message });
+            std.log.warn(
+                "Failed to get device info via wrapper: {} ({s})",
+                .{ info_err.code, info_err.message },
+            );
             self.gpu_enabled = false;
             return;
         }
@@ -178,13 +211,23 @@ pub const StatCalc = struct {
         self.d_ohlc_batch.?.* = std.mem.zeroes(GPUOHLCDataBatch);
         self.d_pct_result.?.* = std.mem.zeroes(GPUPercentageChangeDeviceBatch);
 
-        const kerr = CudaWrapper.allocateMemory(@ptrCast(&self.d_ohlc_batch), @ptrCast(&self.d_pct_result));
+        const kerr = CudaWrapper.allocateMemory(
+            @ptrCast(&self.d_ohlc_batch),
+            @ptrCast(&self.d_pct_result),
+        );
         if (kerr.code != 0) {
-            std.log.warn("CUDA memory allocation failed via wrapper: {} ({s})", .{ kerr.code, kerr.message });
+            std.log.warn(
+                "CUDA memory allocation failed via wrapper: {} ({s})",
+                .{ kerr.code, kerr.message },
+            );
         }
     }
 
-    pub fn calculateSymbolMapBatch(self: *StatCalc, symbol_map: *const SymbolMap, start_index: usize) !GPUBatchResult {
+    pub fn calculateSymbolMapBatch(
+        self: *StatCalc,
+        symbol_map: *const SymbolMap,
+        start_index: usize,
+    ) !GPUBatchResult {
         _ = start_index;
         const symbol_count = symbol_map.count();
         const max_symbols_to_process = @min(symbol_count, MAX_SYMBOLS);
@@ -222,7 +265,9 @@ pub const StatCalc = struct {
         };
 
         if (num_symbols_to_process > 0) {
-            result.device = try self.calculatePercentageChangeBatch(symbols_slice[0..num_symbols_to_process]);
+            result.device = try self.calculatePercentageChangeBatch(
+                symbols_slice[0..num_symbols_to_process],
+            );
             for (0..num_symbols_to_process) |i| {
                 result.symbols[i] = symbol_names[i];
             }
@@ -233,7 +278,10 @@ pub const StatCalc = struct {
         };
     }
 
-    fn calculatePercentageChangeBatch(self: *StatCalc, symbols: []const Symbol) !GPUPercentageChangeDeviceBatch {
+    fn calculatePercentageChangeBatch(
+        self: *StatCalc,
+        symbols: []const Symbol,
+    ) !GPUPercentageChangeDeviceBatch {
         const num_symbols = @min(symbols.len, MAX_SYMBOLS);
         if (num_symbols == 0) return self.h_pct_device;
 
@@ -269,6 +317,7 @@ pub const StatCalc = struct {
         // 15 minutes = 900,000 ms → use this as our synthetic candle bucket
         const bucket_index: i64 = @divTrunc(now_ms, 900_000);
         const current_bucket_ms: i64 = bucket_index * 900_000;
+        const first_trading_bucket_ms: i64 = self.trading_start_bucket_ms;
 
         const num_to_process = num_symbols;
 
@@ -312,12 +361,18 @@ pub const StatCalc = struct {
                 self.h_pct_device.candle_timestamp[i] = current_bucket_ms;
             }
 
-            const pct: f64 = if (open_price_f64 != 0.0)
+            const pct_raw: f64 = if (open_price_f64 != 0.0)
                 ((current_price_f64 - open_price_f64) / open_price_f64) * 100.0
             else
                 0.0;
 
-            self.h_pct_device.percentage_change[i] = @as(f32, @floatCast(pct));
+            // 👇 Gating: before first_trading_bucket_ms → NO TRADES (pct = 0)
+            const pct_final: f64 = if (current_bucket_ms < first_trading_bucket_ms)
+                0.0
+            else
+                pct_raw;
+
+            self.h_pct_device.percentage_change[i] = @as(f32, @floatCast(pct_final));
             self.h_pct_device.current_price[i] = @as(f32, @floatCast(current_price_f64));
             // candle_open_price & candle_timestamp already set above
         }
@@ -331,7 +386,7 @@ pub const StatCalc = struct {
             self.d_pct_result orelse &self.h_pct_device,
             &h_ohlc_batch_zig,
             &self.h_pct_device,
-            @intCast(num_to_process),
+            @intCast(num_symbols),
         );
 
         if (kerr.code != 0) {
@@ -348,14 +403,20 @@ pub const StatCalc = struct {
         var info: DeviceInfo = undefined;
         const kerr = CudaWrapper.getDeviceInfo(self.device_id, &info);
         if (kerr.code != 0) {
-            std.log.warn("Failed to get device info via wrapper: {} ({s})", .{ kerr.code, kerr.message });
+            std.log.warn(
+                "Failed to get device info via wrapper: {} ({s})",
+                .{ kerr.code, kerr.message },
+            );
             return StatCalcError.CUDAGetPropertiesFailed;
         }
 
         std.log.info("=== CUDA Device Information ===", .{});
         std.log.info("Device Name: {s}", .{info.name});
         std.log.info("Compute Capability: {}.{}", .{ info.major, info.minor });
-        std.log.info("Total Global Memory: {} MB", .{@divTrunc(info.totalGlobalMem, 1024 * 1024)});
+        std.log.info(
+            "Total Global Memory: {} MB",
+            .{@divTrunc(info.totalGlobalMem, 1024 * 1024)},
+        );
         std.log.info("==============================", .{});
     }
 
