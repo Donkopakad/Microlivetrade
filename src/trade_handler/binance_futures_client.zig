@@ -21,16 +21,16 @@ pub const SymbolInfo = struct {
 };
 
 pub const BinanceFuturesClient = struct {
-    allocator: std.mem.Allocator,
-    http_client: http.Client,
-    api_key: []const u8,
-    api_secret: []const u8,
-    owns_api_key: bool,
-    owns_api_secret: bool,
-    recv_window: u64,
-    enabled: bool,
-    dry_run_reason: ?[]const u8,
-    symbol_info: std.StringHashMap(SymbolInfo),
+    allocator: std.mem.Allocator;
+    http_client: http.Client;
+    api_key: []const u8;
+    api_secret: []const u8;
+    owns_api_key: bool;
+    owns_api_secret: bool;
+    recv_window: u64;
+    enabled: bool;
+    dry_run_reason: ?[]const u8;
+    symbol_info: std.StringHashMap(SymbolInfo);
 
     pub const base_url: []const u8 = "https://fapi.binance.com";
 
@@ -152,12 +152,14 @@ pub const BinanceFuturesClient = struct {
     ) !OrderResult {
         _ = leverage; // currently unused, kept for API compatibility
         if (!self.enabled) return error.LiveTradingDisabled;
+
         const price = try self.getMarkPrice(symbol);
         const qty = usdt_notional / price;
+
         return self.placeOrderWithQuantity(symbol, qty, side, position_side, reduce_only);
     }
 
-        fn placeOrderWithQuantity(
+    fn placeOrderWithQuantity(
         self: *BinanceFuturesClient,
         symbol: []const u8,
         quantity: f64,
@@ -184,7 +186,7 @@ pub const BinanceFuturesClient = struct {
             .short => "SHORT",
         };
 
-        // ❌ No reduceOnly parameter sent to Binance anymore.
+        // No reduceOnly parameter sent to Binance anymore.
         try query_buf.writer().print(
             "symbol={s}&side={s}&type=MARKET&positionSide={s}&quantity={d:.8}&newClientOrderId={s}",
             .{ symbol, side_str, position_side_str, norm_qty, client_order_id },
@@ -278,20 +280,17 @@ pub const BinanceFuturesClient = struct {
         self.allocator.free(result.status);
     }
 
-        fn normalizeQuantity(self: *BinanceFuturesClient, symbol: []const u8, quantity: f64, price: f64) !f64 {
+    fn normalizeQuantity(self: *BinanceFuturesClient, symbol: []const u8, quantity: f64, price: f64) !f64 {
         const info = try self.ensureSymbolInfo(symbol);
         const step = info.step_size;
         if (step <= 0) return error.InvalidStepSize;
 
-        // ---- FIX: more robust step rounding ----
-        // Work in "number of steps" space and add a tiny epsilon so that
-        // 12.9 / 0.1 = 128.999999... still becomes 129, not 128.
+        // ---- robust step rounding ----
         const steps_raw = quantity / step;
         const eps = 1e-9;
         const steps = std.math.floor(steps_raw + eps);
-
         const adjusted_qty = steps * step;
-        // ----------------------------------------
+        // ------------------------------
 
         if (adjusted_qty <= 0) return error.InvalidQuantity;
         if ((adjusted_qty * price) < info.min_notional or adjusted_qty < info.min_qty) {
@@ -300,9 +299,6 @@ pub const BinanceFuturesClient = struct {
 
         const precision_width: usize = @intCast(info.quantity_precision);
         const pow10 = std.math.pow(f64, 10, @floatFromInt(precision_width));
-
-        // Round to the symbol's precision (not just floor) – adjusted_qty is already
-        // an exact multiple of step, so this won't overshoot.
         const rounded = std.math.round(adjusted_qty * pow10) / pow10;
 
         return rounded;
@@ -319,6 +315,7 @@ pub const BinanceFuturesClient = struct {
         var url_buf = std.ArrayList(u8).init(self.allocator);
         defer url_buf.deinit();
         try url_buf.writer().print("{s}/fapi/v1/exchangeInfo?symbol={s}", .{ base_url, symbol });
+
         const uri = try std.Uri.parse(url_buf.items);
         var req = try self.http_client.open(.GET, uri, .{ .server_header_buffer = try self.allocator.alloc(u8, 8192) });
         defer req.deinit();
@@ -366,16 +363,23 @@ pub const BinanceFuturesClient = struct {
                         const fobj = filter.object;
                         const filter_type = fobj.get("filterType") orelse continue;
                         if (filter_type != .string) continue;
+
                         if (std.mem.eql(u8, filter_type.string, "LOT_SIZE")) {
                             if (fobj.get("stepSize")) |step_val| {
-                                if (step_val == .string) step_size = std.fmt.parseFloat(f64, step_val.string) catch step_size;
+                                if (step_val == .string) {
+                                    step_size = std.fmt.parseFloat(f64, step_val.string) catch step_size;
+                                }
                             }
                             if (fobj.get("minQty")) |min_qty_val| {
-                                if (min_qty_val == .string) min_qty = std.fmt.parseFloat(f64, min_qty_val.string) catch min_qty;
+                                if (min_qty_val == .string) {
+                                    min_qty = std.fmt.parseFloat(f64, min_qty_val.string) catch min_qty;
+                                }
                             }
                         } else if (std.mem.eql(u8, filter_type.string, "MIN_NOTIONAL")) {
                             if (fobj.get("notional")) |notional_val| {
-                                if (notional_val == .string) min_notional = std.fmt.parseFloat(f64, notional_val.string) catch min_notional;
+                                if (notional_val == .string) {
+                                    min_notional = std.fmt.parseFloat(f64, notional_val.string) catch min_notional;
+                                }
                             }
                         }
                     }
@@ -405,21 +409,38 @@ pub const BinanceFuturesClient = struct {
     fn getMarkPrice(self: *BinanceFuturesClient, symbol: []const u8) !f64 {
         var url_buf = std.ArrayList(u8).init(self.allocator);
         defer url_buf.deinit();
+
         try url_buf.writer().print("{s}/fapi/v1/ticker/price?symbol={s}", .{ base_url, symbol });
+
         const uri = try std.Uri.parse(url_buf.items);
-        var req = try self.http_client.open(.GET, uri, .{ .server_header_buffer = try self.allocator.alloc(u8, 4096) });
+        var req = try self.http_client.open(.GET, uri, .{
+            .server_header_buffer = try self.allocator.alloc(u8, 4096),
+        });
         defer req.deinit();
+
         try req.send();
         try req.wait();
         if (req.response.status != .ok) return error.PriceRequestFailed;
+
         const body = try req.reader().readAllAlloc(self.allocator, 4096);
         defer self.allocator.free(body);
+
         var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, body, .{});
         defer parsed.deinit();
+
         const root = parsed.value;
         const price_val = root.object.get("price") orelse return error.PriceRequestFailed;
         if (price_val != .string) return error.PriceRequestFailed;
-        return std.fmt.parseFloat(f64, price_val.string);
+
+        const parsed_price = std.fmt.parseFloat(f64, price_val.string) catch return error.PriceRequestFailed;
+
+        // ✅ Safety: never trade with non-positive or NaN mark price
+        if (!(parsed_price > 0.0)) {
+            std.log.err("Received non-positive mark price for {s}: {d}", .{ symbol, parsed_price });
+            return error.PriceRequestFailed;
+        }
+
+        return parsed_price;
     }
 
     fn signedRequest(self: *BinanceFuturesClient, method: http.Method, path: []const u8, base_query: []const u8) ![]const u8 {
@@ -486,11 +507,20 @@ pub const BinanceFuturesClient = struct {
         if (code_val != null or msg_val != null) {
             if (code_val) |cv| {
                 switch (cv) {
-                    .integer => std.log.err("Binance error {s}: code {d} msg {s}", .{ path, cv.integer, if (msg_val != null and msg_val.? == .string) msg_val.?.string else "" }),
-                    else => std.log.err("Binance error {s}: msg {s}", .{ path, if (msg_val != null and msg_val.? == .string) msg_val.?.string else "" }),
+                    .integer => std.log.err(
+                        "Binance error {s}: code {d} msg {s}",
+                        .{ path, cv.integer, if (msg_val != null and msg_val.? == .string) msg_val.?.string else "" },
+                    ),
+                    else => std.log.err(
+                        "Binance error {s}: msg {s}",
+                        .{ path, if (msg_val != null and msg_val.? == .string) msg_val.?.string else "" },
+                    ),
                 }
             } else {
-                std.log.err("Binance error {s}: msg {s}", .{ path, if (msg_val != null and msg_val.? == .string) msg_val.?.string else "" });
+                std.log.err(
+                    "Binance error {s}: msg {s}",
+                    .{ path, if (msg_val != null and msg_val.? == .string) msg_val.?.string else "" },
+                );
             }
         }
     }
