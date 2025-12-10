@@ -14,9 +14,9 @@ pub const PositionSide = enum {
     short,
 };
 
-// ✅ Fixed config: each trade uses 125 USDT notional with 5x leverage
-const TRADE_NOTIONAL_USDT: f64 = 125.0; // position size per trade
-const TRADE_LEVERAGE: f64 = 5.0;        // 5x leverage
+// ✅ Fixed config: each trade uses 50 USDT notional with 5x leverage
+const TRADE_NOTIONAL_USDT: f64 = 50.0; // position size per trade
+const TRADE_LEVERAGE: f64 = 1.0;        // 1x leverage
 
 // Dust and exposure controls
 const DUST_NOTIONAL_THRESHOLD_USD: f64 = 1.0;
