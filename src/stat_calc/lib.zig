@@ -112,6 +112,9 @@ pub const StatCalc = struct {
     d_ohlc_batch: ?*GPUOHLCDataBatch,
     d_pct_result: ?*GPUPercentageChangeDeviceBatch,
 
+    /// Host-side buffer that we *reuse* across batches.
+    /// We now keep candle_open_price + candle_timestamp here as
+    /// synthetic 15m buckets.
     h_pct_device: GPUPercentageChangeDeviceBatch,
 
     pub fn init(allocator: std.mem.Allocator, device_id: c_int) !StatCalc {
@@ -231,10 +234,18 @@ pub const StatCalc = struct {
         };
     }
 
+    /// New behaviour:
+    /// - 1 second batches
+    /// - Synthetic 15-minute buckets based on wall-clock time
+    /// - For each symbol index i, we:
+    ///   * compute current 15m bucket (00, 15, 30, 45)
+    ///   * if bucket changed -> fix candle_open_price = current_price
+    ///   * keep using this open for the rest of that 15m window
     fn calculatePercentageChangeBatch(self: *StatCalc, symbols: []const Symbol) !GPUPercentageChangeDeviceBatch {
         const num_symbols = @min(symbols.len, MAX_SYMBOLS);
         if (num_symbols == 0) return self.h_pct_device;
 
+        // Prepare host batch for CUDA wrapper (even though wrapper is CPU stub here)
         var h_ohlc_batch_zig = GPUOHLCDataBatch{
             .close_prices = [_][15]f32{[_]f32{0.0} ** 15} ** MAX_SYMBOLS,
             .counts = [_]u32{0} ** MAX_SYMBOLS,
@@ -251,38 +262,67 @@ pub const StatCalc = struct {
             for (0..symbols[i].count) |j| {
                 if (data_idx >= 15) break;
                 const current_ohlc_idx = (circ_buffer_start_idx + j) % 15;
-                h_ohlc_batch_zig.close_prices[i][data_idx] = @as(f32, @floatCast(symbols[i].ticker_queue[current_ohlc_idx].close_price));
+                h_ohlc_batch_zig.close_prices[i][data_idx] =
+                    @as(f32, @floatCast(symbols[i].ticker_queue[current_ohlc_idx].close_price));
                 data_idx += 1;
             }
         }
 
-        self.h_pct_device = std.mem.zeroes(GPUPercentageChangeDeviceBatch);
-
+        // Wall-clock in ms
         const now_ms: i64 = @intCast(@divTrunc(std.time.nanoTimestamp(), 1_000_000));
+        // 15 minutes = 900,000 ms → this defines our synthetic candle bucket
+        const current_bucket_ms: i64 = (now_ms / 900_000) * 900_000;
+
         for (0..num_symbols) |i| {
             const sym = symbols[i];
-            const latest_idx = if (sym.count == 0) 0 else (sym.head + 15 - 1) % 15;
-            const current_price_f64 = if (sym.count == 0)
+
+            // Last known close from the 15-slot circular buffer
+            const latest_idx: usize = if (sym.count == 0) 0 else (sym.head + 15 - 1) % 15;
+            const last_close_f64: f64 = if (sym.count == 0)
                 0.0
             else
                 sym.ticker_queue[latest_idx].close_price;
-            const current_price = if (sym.current_price != 0.0) sym.current_price else current_price_f64;
-            const candle_open = if (sym.candle_open_price != 0.0)
-                sym.candle_open_price
-            else if (sym.count > 0)
-                sym.ticker_queue[(sym.head + 15 - sym.count) % 15].close_price
-            else
-                current_price;
 
-            const pct = if (candle_open != 0.0)
-                ((current_price - candle_open) / candle_open) * 100.0
+            // Prefer live tick (sym.current_price); fallback to last close
+            const current_price_f64: f64 = if (sym.current_price != 0.0)
+                sym.current_price
+            else
+                last_close_f64;
+
+            // ---- Synthetic 15-minute candle open logic --------------------
+            // We use h_pct_device.candle_timestamp[i] as the "bucket" marker.
+            const prev_bucket: i64 = self.h_pct_device.candle_timestamp[i];
+            var open_price_f64: f64 = @as(f64, @floatCast(self.h_pct_device.candle_open_price[i]));
+
+            if (prev_bucket != current_bucket_ms) {
+                // ✅ New 15-minute window:
+                // Fix the open price to the *current* price at the first batch
+                // tick inside this window (your “12:15:00” behaviour).
+                open_price_f64 = current_price_f64;
+                self.h_pct_device.candle_timestamp[i] = current_bucket_ms;
+                self.h_pct_device.candle_open_price[i] = @as(f32, @floatCast(open_price_f64));
+            } else if (open_price_f64 == 0.0) {
+                // Same bucket but we don't have an open yet (brand-new symbol)
+                open_price_f64 = if (current_price_f64 != 0.0)
+                    current_price_f64
+                else if (sym.count > 0)
+                    sym.ticker_queue[(sym.head + 15 - sym.count) % 15].close_price
+                else
+                    0.0;
+
+                self.h_pct_device.candle_open_price[i] = @as(f32, @floatCast(open_price_f64));
+                self.h_pct_device.candle_timestamp[i] = current_bucket_ms;
+            }
+            // ----------------------------------------------------------------
+
+            const pct: f64 = if (open_price_f64 != 0.0)
+                ((current_price_f64 - open_price_f64) / open_price_f64) * 100.0
             else
                 0.0;
 
             self.h_pct_device.percentage_change[i] = @as(f32, @floatCast(pct));
-            self.h_pct_device.current_price[i] = @as(f32, @floatCast(current_price));
-            self.h_pct_device.candle_open_price[i] = @as(f32, @floatCast(candle_open));
-            self.h_pct_device.candle_timestamp[i] = if (sym.candle_start_time != 0) sym.candle_start_time else now_ms;
+            self.h_pct_device.current_price[i] = @as(f32, @floatCast(current_price_f64));
+            // candle_open_price & candle_timestamp already set above
         }
 
         if (self.d_ohlc_batch == null) {
