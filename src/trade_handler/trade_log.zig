@@ -102,6 +102,24 @@ pub const TradeLogger = struct {
         candle_close_at_entry: f64,
         pct_entry: f64,
     ) !void {
+        // ---------- HUMAN LOG (only when a trade actually opens) ----------
+        var ts_buf: [64]u8 = undefined;
+        const t_event = try formatTimestamp(event_time_ns, &ts_buf);
+
+        // Example: "Opened SHORT on Binance COMPUSDT because pct = -5.23% from open 0.075100 -> entry 0.071200 at 1765344602"
+        std.log.info(
+            "Opened {s} on Binance {s} because pct = {d:.2}% from open {d:.6} -> entry {d:.6} at {s}",
+            .{
+                side,
+                symbol,
+                pct_entry,
+                candle_open,
+                entry_price,
+                t_event,
+            },
+        );
+        // ------------------------------------------------------------------
+
         const row = TradeRow{
             .event_time_ns = event_time_ns,
             .event_type = "open",
@@ -151,6 +169,24 @@ pub const TradeLogger = struct {
         pct_entry: f64,
         pct_exit: f64,
     ) !void {
+        // ---------- HUMAN LOG (only when a trade actually closes) ----------
+        var ts_buf: [64]u8 = undefined;
+        const t_event = try formatTimestamp(event_time_ns, &ts_buf);
+
+        std.log.info(
+            "Closed {s} on Binance {s} with pnl = {d:.4} USDT, pct_exit = {d:.2}% at {s} (entry={d:.6} exit={d:.6})",
+            .{
+                side,
+                symbol,
+                pnl_usdt,
+                pct_exit,
+                t_event,
+                entry_price,
+                exit_price,
+            },
+        );
+        // -------------------------------------------------------------------
+
         const row = TradeRow{
             .event_time_ns = event_time_ns,
             .event_type = "close",
