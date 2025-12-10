@@ -112,9 +112,8 @@ pub const StatCalc = struct {
     d_ohlc_batch: ?*GPUOHLCDataBatch,
     d_pct_result: ?*GPUPercentageChangeDeviceBatch,
 
-    /// Host-side buffer that we *reuse* across batches.
-    /// We now keep candle_open_price + candle_timestamp here as
-    /// synthetic 15m buckets.
+    // This holds the “live” device/CPU results and also stores
+    // the synthetic 15m bucket & open per index between calls.
     h_pct_device: GPUPercentageChangeDeviceBatch,
 
     pub fn init(allocator: std.mem.Allocator, device_id: c_int) !StatCalc {
@@ -234,18 +233,11 @@ pub const StatCalc = struct {
         };
     }
 
-    /// New behaviour:
-    /// - 1 second batches
-    /// - Synthetic 15-minute buckets based on wall-clock time
-    /// - For each symbol index i, we:
-    ///   * compute current 15m bucket (00, 15, 30, 45)
-    ///   * if bucket changed -> fix candle_open_price = current_price
-    ///   * keep using this open for the rest of that 15m window
     fn calculatePercentageChangeBatch(self: *StatCalc, symbols: []const Symbol) !GPUPercentageChangeDeviceBatch {
         const num_symbols = @min(symbols.len, MAX_SYMBOLS);
         if (num_symbols == 0) return self.h_pct_device;
 
-        // Prepare host batch for CUDA wrapper (even though wrapper is CPU stub here)
+        // Prepare host batch for the CUDA wrapper (even if we're on CPU fallback)
         var h_ohlc_batch_zig = GPUOHLCDataBatch{
             .close_prices = [_][15]f32{[_]f32{0.0} ** 15} ** MAX_SYMBOLS,
             .counts = [_]u32{0} ** MAX_SYMBOLS,
@@ -268,12 +260,19 @@ pub const StatCalc = struct {
             }
         }
 
+        // NOTE: we DO NOT reset self.h_pct_device here.
+        // It keeps the previous bucket & open per index so that
+        // the synthetic 15m candle open is stable within the window.
+
         // Wall-clock in ms
         const now_ms: i64 = @intCast(@divTrunc(std.time.nanoTimestamp(), 1_000_000));
-        // 15 minutes = 900,000 ms → this defines our synthetic candle bucket
-        const current_bucket_ms: i64 = (now_ms / 900_000) * 900_000;
+        // 15 minutes = 900,000 ms → use this as our synthetic candle bucket
+        const bucket_index: i64 = @divTrunc(now_ms, 900_000);
+        const current_bucket_ms: i64 = bucket_index * 900_000;
 
-        for (0..num_symbols) |i| {
+        const num_to_process = num_symbols;
+
+        for (0..num_to_process) |i| {
             const sym = symbols[i];
 
             // Last known close from the 15-slot circular buffer
@@ -289,20 +288,19 @@ pub const StatCalc = struct {
             else
                 last_close_f64;
 
-            // ---- Synthetic 15-minute candle open logic --------------------
-            // We use h_pct_device.candle_timestamp[i] as the "bucket" marker.
+            // Use h_pct_device.candle_timestamp[i] as the "bucket" marker.
             const prev_bucket: i64 = self.h_pct_device.candle_timestamp[i];
-            var open_price_f64: f64 = @as(f64, @floatCast(self.h_pct_device.candle_open_price[i]));
+            var open_price_f64: f64 = @as(f64, self.h_pct_device.candle_open_price[i]);
 
             if (prev_bucket != current_bucket_ms) {
                 // ✅ New 15-minute window:
-                // Fix the open price to the *current* price at the first batch
-                // tick inside this window (your “12:15:00” behaviour).
+                // Fix the open price to the *current* price at the first batch tick
+                // inside this window (your “12:15:00” behaviour).
                 open_price_f64 = current_price_f64;
                 self.h_pct_device.candle_timestamp[i] = current_bucket_ms;
                 self.h_pct_device.candle_open_price[i] = @as(f32, @floatCast(open_price_f64));
             } else if (open_price_f64 == 0.0) {
-                // Same bucket but we don't have an open yet (brand-new symbol)
+                // Same window, but first time we see this symbol in this bucket
                 open_price_f64 = if (current_price_f64 != 0.0)
                     current_price_f64
                 else if (sym.count > 0)
@@ -313,7 +311,6 @@ pub const StatCalc = struct {
                 self.h_pct_device.candle_open_price[i] = @as(f32, @floatCast(open_price_f64));
                 self.h_pct_device.candle_timestamp[i] = current_bucket_ms;
             }
-            // ----------------------------------------------------------------
 
             const pct: f64 = if (open_price_f64 != 0.0)
                 ((current_price_f64 - open_price_f64) / open_price_f64) * 100.0
@@ -334,11 +331,14 @@ pub const StatCalc = struct {
             self.d_pct_result orelse &self.h_pct_device,
             &h_ohlc_batch_zig,
             &self.h_pct_device,
-            @intCast(num_symbols),
+            @intCast(num_to_process),
         );
 
         if (kerr.code != 0) {
-            std.log.warn("Percentage change kernel execution failed via wrapper: {} ({s})", .{ kerr.code, kerr.message });
+            std.log.warn(
+                "Percentage change kernel execution failed via wrapper: {} ({s})",
+                .{ kerr.code, kerr.message },
+            );
         }
 
         return self.h_pct_device;
