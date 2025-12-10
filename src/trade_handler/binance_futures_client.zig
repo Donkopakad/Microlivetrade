@@ -21,16 +21,16 @@ pub const SymbolInfo = struct {
 };
 
 pub const BinanceFuturesClient = struct {
-    allocator: std.mem.Allocator;
-    http_client: http.Client;
-    api_key: []const u8;
-    api_secret: []const u8;
-    owns_api_key: bool;
-    owns_api_secret: bool;
-    recv_window: u64;
-    enabled: bool;
-    dry_run_reason: ?[]const u8;
-    symbol_info: std.StringHashMap(SymbolInfo);
+    allocator: std.mem.Allocator,
+    http_client: http.Client,
+    api_key: []const u8,
+    api_secret: []const u8,
+    owns_api_key: bool,
+    owns_api_secret: bool,
+    recv_window: u64,
+    enabled: bool,
+    dry_run_reason: ?[]const u8,
+    symbol_info: std.StringHashMap(SymbolInfo),
 
     pub const base_url: []const u8 = "https://fapi.binance.com";
 
@@ -285,12 +285,11 @@ pub const BinanceFuturesClient = struct {
         const step = info.step_size;
         if (step <= 0) return error.InvalidStepSize;
 
-        // ---- robust step rounding ----
+        // robust step rounding
         const steps_raw = quantity / step;
         const eps = 1e-9;
         const steps = std.math.floor(steps_raw + eps);
         const adjusted_qty = steps * step;
-        // ------------------------------
 
         if (adjusted_qty <= 0) return error.InvalidQuantity;
         if ((adjusted_qty * price) < info.min_notional or adjusted_qty < info.min_qty) {
@@ -434,7 +433,7 @@ pub const BinanceFuturesClient = struct {
 
         const parsed_price = std.fmt.parseFloat(f64, price_val.string) catch return error.PriceRequestFailed;
 
-        // ✅ Safety: never trade with non-positive or NaN mark price
+        // Safety: never trade with non-positive or NaN mark price
         if (!(parsed_price > 0.0)) {
             std.log.err("Received non-positive mark price for {s}: {d}", .{ symbol, parsed_price });
             return error.PriceRequestFailed;
