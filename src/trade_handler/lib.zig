@@ -7,7 +7,7 @@ const PositionSide = portfolio_manager.PositionSide;
 const TradingSignal = types.TradingSignal;
 const binance = @import("binance_futures_client.zig");
 
-const EXIT_INTERVAL_NS: u64 = 500_000_000; // 500ms
+const EXIT_INTERVAL_NS: u64 = 50_000_000; // 50ms exit checks for TP / SL / safety exits
 
 pub const TradeHandler = struct {
     allocator: std.mem.Allocator,
