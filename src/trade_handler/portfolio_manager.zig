@@ -34,6 +34,8 @@ const PortfolioPosition = struct {
     side: PositionSide,
     leverage: f32,
     order_id: ?i64,
+    take_profit_price: f64,
+    stop_loss_price: f64,
 };
 
 pub const PortfolioManager = struct {
@@ -45,8 +47,6 @@ pub const PortfolioManager = struct {
     fee_rate: f64,
 
     positions: std.StringHashMap(PortfolioPosition),
-    last_traded_candle_start_ns: std.StringHashMap(i128),
-    last_skip_log_candle: std.StringHashMap(i128),
     margin_enforcer: margin.MarginEnforcer,
 
     trade_logger: ?*trade_log.TradeLogger,
@@ -64,8 +64,6 @@ pub const PortfolioManager = struct {
                 .balance_usdt = 1000.0,
                 .fee_rate = 0.001,
                 .positions = std.StringHashMap(PortfolioPosition).init(allocator),
-                .last_traded_candle_start_ns = std.StringHashMap(i128).init(allocator),
-                .last_skip_log_candle = std.StringHashMap(i128).init(allocator),
                 .margin_enforcer = margin.MarginEnforcer.init(allocator, true, binance_client),
                 .trade_logger = null,
                 .candle_duration_ns = 15 * 60 * 1_000_000_000,
@@ -100,8 +98,6 @@ pub const PortfolioManager = struct {
             .balance_usdt = starting_balance,
             .fee_rate = 0.001,
             .positions = std.StringHashMap(PortfolioPosition).init(allocator),
-            .last_traded_candle_start_ns = std.StringHashMap(i128).init(allocator),
-            .last_skip_log_candle = std.StringHashMap(i128).init(allocator),
             .margin_enforcer = margin.MarginEnforcer.init(allocator, true, binance_client),
             .trade_logger = logger,
             .candle_duration_ns = 15 * 60 * 1_000_000_000,
@@ -110,37 +106,17 @@ pub const PortfolioManager = struct {
 
     pub fn deinit(self: *PortfolioManager) void {
         self.cleanupPositions();
-        self.cleanupLastTraded();
         if (self.trade_logger) |logger| {
             logger.deinit();
             self.allocator.destroy(logger);
         }
         self.positions.deinit();
-        self.last_traded_candle_start_ns.deinit();
-        self.last_skip_log_candle.deinit();
         self.margin_enforcer.deinit();
     }
 
     pub fn processSignal(self: *PortfolioManager, signal: TradingSignal) !void {
         const price = try symbol_map.getLastClosePrice(self.symbol_map, signal.symbol_name);
         const candle_start_ns = self.currentCandleStart(signal.symbol_name, signal.timestamp);
-
-        // One-trade-per-symbol-per-candle guard
-        if (!self.canTradeThisCandle(signal.symbol_name, candle_start_ns)) {
-            // Only log once per symbol per candle
-            if (self.last_skip_log_candle.get(signal.symbol_name)) |prev_value| {
-                if (prev_value == candle_start_ns) {
-                    // We already logged this skip for this symbol in this candle; just skip silently
-                    return;
-                }
-            }
-
-            std.log.info("Skipping signal for {s}; already traded this candle", .{ signal.symbol_name });
-
-            // Record that we logged for this symbol+candle
-            try self.last_skip_log_candle.put(signal.symbol_name, candle_start_ns);
-            return;
-        }
 
         switch (signal.signal_type) {
             .BUY => self.executeBuy(signal, price, candle_start_ns),
@@ -150,7 +126,6 @@ pub const PortfolioManager = struct {
     }
 
     pub fn checkStopLossConditions(self: *PortfolioManager) !void {
-        const now_ns = std.time.nanoTimestamp();
         var to_close = std.ArrayList([]const u8).init(self.allocator);
         defer to_close.deinit();
 
@@ -158,8 +133,40 @@ pub const PortfolioManager = struct {
         while (it.next()) |entry| {
             const position = entry.value_ptr;
             if (!position.is_open) continue;
-            if (now_ns >= position.candle_end_timestamp) {
-                try to_close.append(entry.key_ptr.*);
+
+            const sym_name = entry.key_ptr.*;
+            const price = symbol_map.getLastClosePrice(self.symbol_map, sym_name) catch {
+                continue;
+            };
+
+            var hit_tp = false;
+            var hit_sl = false;
+
+            switch (position.side) {
+                .long => {
+                    if (position.take_profit_price > 0.0 and price >= position.take_profit_price) {
+                        hit_tp = true;
+                    }
+                    if (position.stop_loss_price > 0.0 and price <= position.stop_loss_price) {
+                        hit_sl = true;
+                    }
+                },
+                .short => {
+                    if (position.take_profit_price > 0.0 and price <= position.take_profit_price) {
+                        hit_tp = true;
+                    }
+                    if (position.stop_loss_price > 0.0 and price >= position.stop_loss_price) {
+                        hit_sl = true;
+                    }
+                },
+                .none => {},
+            }
+
+            const now_ns = std.time.nanoTimestamp();
+            const hit_time_exit = now_ns >= position.candle_end_timestamp;
+
+            if (hit_tp or hit_sl or hit_time_exit) {
+                try to_close.append(sym_name);
             }
         }
 
@@ -203,30 +210,6 @@ pub const PortfolioManager = struct {
             if (pos.is_open) return pos.side;
         }
         return .none;
-    }
-
-    fn canTradeThisCandle(self: *PortfolioManager, symbol_name: []const u8, candle_start_ns: i128) bool {
-        if (self.last_traded_candle_start_ns.get(symbol_name)) |last| {
-            if (last == candle_start_ns) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    fn markCandleTraded(self: *PortfolioManager, symbol_name: []const u8, candle_start_ns: i128) void {
-        if (self.last_traded_candle_start_ns.getPtr(symbol_name)) |ptr| {
-            ptr.* = candle_start_ns;
-            return;
-        }
-
-        const key_copy = self.allocator.dupe(u8, symbol_name) catch |err| {
-            std.log.err("Failed to record traded candle for {s}: {}", .{ symbol_name, err });
-            return;
-        };
-        self.last_traded_candle_start_ns.put(key_copy, candle_start_ns) catch |err| {
-            std.log.err("Failed to insert traded candle record for {s}: {}", .{ symbol_name, err });
-        };
     }
 
     pub fn countOpenPositions(self: *PortfolioManager) usize {
@@ -314,7 +297,6 @@ pub const PortfolioManager = struct {
                 const entry_price = if (order.avg_price > 0) order.avg_price else price;
                 const actual_notional = if (order.cum_quote > 0) order.cum_quote else position_size_usdt;
                 self.recordPosition(signal, side, amount, entry_price, candle_start_ns, candle_end_ns, actual_notional, order.order_id);
-                self.markCandleTraded(signal.symbol_name, candle_start_ns);
                 std.log.info("Opened LONG on Binance {s} orderId={} qty={d:.6} price=${d:.4}", .{ signal.symbol_name, order.order_id, amount, entry_price });
             } else {
                 self.binance_client.setLeverage(signal.symbol_name, @intFromFloat(leverage)) catch {};
@@ -327,13 +309,11 @@ pub const PortfolioManager = struct {
                 const entry_price = if (order.avg_price > 0) order.avg_price else price;
                 const actual_notional = if (order.cum_quote > 0) order.cum_quote else position_size_usdt;
                 self.recordPosition(signal, side, amount, entry_price, candle_start_ns, candle_end_ns, actual_notional, order.order_id);
-                self.markCandleTraded(signal.symbol_name, candle_start_ns);
                 std.log.info("Opened SHORT on Binance {s} orderId={} qty={d:.6} price=${d:.4}", .{ signal.symbol_name, order.order_id, amount, entry_price });
             }
         } else {
             const amount = position_size_usdt / price;
             self.recordPosition(signal, side, amount, price, candle_start_ns, candle_end_ns, position_size_usdt, null);
-            self.markCandleTraded(signal.symbol_name, candle_start_ns);
             std.log.info("Opened simulated {s} {s} qty={d:.6} price=${d:.4}", .{ (if (side == .long) "LONG" else "SHORT"), signal.symbol_name, amount, price });
         }
     }
@@ -363,10 +343,33 @@ pub const PortfolioManager = struct {
                 .side = .none,
                 .leverage = 1.0,
                 .order_id = null,
+                .take_profit_price = 0.0,
+                .stop_loss_price = 0.0,
             }) catch unreachable;
         }
 
         var pos = self.positions.getPtr(signal.symbol_name).?;
+        var tp: f64 = 0.0;
+        var sl: f64 = 0.0;
+
+        const entry_pct = signal.orderbook_percentage;
+        const open_est = entry_price / (1.0 + entry_pct / 100.0);
+
+        switch (side) {
+            .long => {
+                tp = open_est * 1.035;
+                sl = open_est * 1.025;
+            },
+            .short => {
+                tp = open_est * 0.965;
+                sl = open_est * 0.975;
+            },
+            .none => {
+                tp = 0.0;
+                sl = 0.0;
+            },
+        }
+
         pos.symbol = signal.symbol_name;
         pos.amount = amount;
         pos.avg_entry_price = entry_price;
@@ -378,6 +381,8 @@ pub const PortfolioManager = struct {
         pos.side = side;
         pos.leverage = @floatCast(signal.leverage); // kept as-is; just for record
         pos.order_id = order_id;
+        pos.take_profit_price = tp;
+        pos.stop_loss_price = sl;
 
         if (self.trade_logger) |_| {
             // Trade logging temporarily disabled to avoid mismatches with TradeLogger API.
@@ -435,13 +440,6 @@ pub const PortfolioManager = struct {
 
     fn cleanupPositions(self: *PortfolioManager) void {
         var it = self.positions.iterator();
-        while (it.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-        }
-    }
-
-    fn cleanupLastTraded(self: *PortfolioManager) void {
-        var it = self.last_traded_candle_start_ns.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
         }
