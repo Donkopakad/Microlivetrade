@@ -49,6 +49,8 @@ pub const PortfolioManager = struct {
     positions: std.StringHashMap(PortfolioPosition),
     last_traded_candle_start_ns: std.StringHashMap(i128),
     last_skip_log_candle: std.StringHashMap(i128),
+    // NEW: remember which 15m candle we already logged for each symbol
+    orderbook_logged_candle_start_ns: std.StringHashMap(i128),
     margin_enforcer: margin.MarginEnforcer,
 
     trade_logger: ?*trade_log.TradeLogger,
@@ -70,6 +72,7 @@ pub const PortfolioManager = struct {
                 .positions = std.StringHashMap(PortfolioPosition).init(allocator),
                 .last_traded_candle_start_ns = std.StringHashMap(i128).init(allocator),
                 .last_skip_log_candle = std.StringHashMap(i128).init(allocator),
+                .orderbook_logged_candle_start_ns = std.StringHashMap(i128).init(allocator),
                 .margin_enforcer = margin.MarginEnforcer.init(allocator, true, binance_client),
                 .trade_logger = null,
                 .orderbook_logger = null,
@@ -89,6 +92,7 @@ pub const PortfolioManager = struct {
                 .positions = std.StringHashMap(PortfolioPosition).init(allocator),
                 .last_traded_candle_start_ns = std.StringHashMap(i128).init(allocator),
                 .last_skip_log_candle = std.StringHashMap(i128).init(allocator),
+                .orderbook_logged_candle_start_ns = std.StringHashMap(i128).init(allocator),
                 .margin_enforcer = margin.MarginEnforcer.init(allocator, true, binance_client),
                 .trade_logger = logger,
                 .orderbook_logger = null,
@@ -126,6 +130,7 @@ pub const PortfolioManager = struct {
             .positions = std.StringHashMap(PortfolioPosition).init(allocator),
             .last_traded_candle_start_ns = std.StringHashMap(i128).init(allocator),
             .last_skip_log_candle = std.StringHashMap(i128).init(allocator),
+            .orderbook_logged_candle_start_ns = std.StringHashMap(i128).init(allocator),
             .margin_enforcer = margin.MarginEnforcer.init(allocator, true, binance_client),
             .trade_logger = logger,
             .orderbook_logger = orderbook_logger,
@@ -136,6 +141,7 @@ pub const PortfolioManager = struct {
     pub fn deinit(self: *PortfolioManager) void {
         self.cleanupPositions();
         self.cleanupLastTraded();
+        self.cleanupOrderbookLogged();
         if (self.trade_logger) |logger| {
             logger.deinit();
         }
@@ -145,6 +151,7 @@ pub const PortfolioManager = struct {
         self.positions.deinit();
         self.last_traded_candle_start_ns.deinit();
         self.last_skip_log_candle.deinit();
+        self.orderbook_logged_candle_start_ns.deinit();
         self.margin_enforcer.deinit();
     }
 
@@ -152,10 +159,22 @@ pub const PortfolioManager = struct {
         const price = try symbol_map.getLastClosePrice(self.symbol_map, signal.symbol_name);
         const candle_start_ns = self.currentCandleStart(signal.symbol_name, signal.timestamp);
 
+        // ✅ Only log the FIRST 5% event per symbol per 15-minute candle
+        if (!self.canLogSnapshotThisCandle(signal.symbol_name, candle_start_ns)) {
+            // We've already captured a 5% event for this symbol in this timeframe
+            return;
+        }
+
         self.logOrderbookSnapshot(signal, price, candle_start_ns) catch |err| {
             std.log.warn("Failed to log orderbook snapshot for {s}: {}", .{ signal.symbol_name, err });
+            // On failure, do NOT mark as logged so a later event can still be captured
+            return;
         };
 
+        // Mark this candle as already logged for this symbol
+        self.markSnapshotLogged(signal.symbol_name, candle_start_ns);
+
+        // Research branch: no actual trading
         switch (signal.signal_type) {
             .BUY => {},
             .SELL => {},
@@ -353,6 +372,32 @@ pub const PortfolioManager = struct {
             }
         }
         return count;
+    }
+
+    fn canLogSnapshotThisCandle(self: *PortfolioManager, symbol_name: []const u8, candle_start_ns: i128) bool {
+        if (self.orderbook_logged_candle_start_ns.get(symbol_name)) |last| {
+            if (last == candle_start_ns) {
+                // already logged for this symbol in this 15m window
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn markSnapshotLogged(self: *PortfolioManager, symbol_name: []const u8, candle_start_ns: i128) void {
+        if (self.orderbook_logged_candle_start_ns.getPtr(symbol_name)) |ptr| {
+            ptr.* = candle_start_ns;
+            return;
+        }
+
+        const key_copy = self.allocator.dupe(u8, symbol_name) catch |err| {
+            std.log.err("Failed to record logged snapshot candle for {s}: {}", .{ symbol_name, err });
+            return;
+        };
+
+        self.orderbook_logged_candle_start_ns.put(key_copy, candle_start_ns) catch |err| {
+            std.log.err("Failed to insert logged snapshot candle for {s}: {}", .{ symbol_name, err });
+        };
     }
 
     fn executeBuy(self: *PortfolioManager, signal: TradingSignal, price: f64, candle_start_ns: i128) void {
@@ -557,6 +602,13 @@ pub const PortfolioManager = struct {
 
     fn cleanupLastTraded(self: *PortfolioManager) void {
         var it = self.last_traded_candle_start_ns.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+    }
+
+    fn cleanupOrderbookLogged(self: *PortfolioManager) void {
+        var it = self.orderbook_logged_candle_start_ns.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
         }
