@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const MAX_ORDERBOOK_SIZE = 5;
+pub const MAX_ORDERBOOK_SIZE = 20;
 
 pub const SignalType = enum { BUY, SELL, HOLD };
 
@@ -234,49 +234,21 @@ pub const OrderBook = struct {
         self.ask_count += 1;
     }
 
-    fn removeBidLevel(self: *OrderBook, target_idx: usize) void {
-        var pos: usize = 0;
-        var i: usize = 0;
-        while (i < self.bid_count) : (i += 1) {
-            const actual_idx = (self.bid_head + i) % MAX_ORDERBOOK_SIZE;
-            if (actual_idx == target_idx) {
-                pos = i;
-                break;
-            }
+    fn removeBidLevel(self: *OrderBook, idx: usize) void {
+        var i: usize = idx;
+        while (i != self.bid_head + self.bid_count - 1) : (i = (i + 1) % MAX_ORDERBOOK_SIZE) {
+            const next_idx = (i + 1) % MAX_ORDERBOOK_SIZE;
+            self.bids[i] = self.bids[next_idx];
         }
-
-        if (pos < self.bid_count - 1) {
-            var shift_i = pos;
-            while (shift_i < self.bid_count - 1) : (shift_i += 1) {
-                const from_idx = (self.bid_head + shift_i + 1) % MAX_ORDERBOOK_SIZE;
-                const to_idx = (self.bid_head + shift_i) % MAX_ORDERBOOK_SIZE;
-                self.bids[to_idx] = self.bids[from_idx];
-            }
-        }
-
         self.bid_count -= 1;
     }
 
-    fn removeAskLevel(self: *OrderBook, target_idx: usize) void {
-        var pos: usize = 0;
-        var i: usize = 0;
-        while (i < self.ask_count) : (i += 1) {
-            const actual_idx = (self.ask_head + i) % MAX_ORDERBOOK_SIZE;
-            if (actual_idx == target_idx) {
-                pos = i;
-                break;
-            }
+    fn removeAskLevel(self: *OrderBook, idx: usize) void {
+        var i: usize = idx;
+        while (i != self.ask_head + self.ask_count - 1) : (i = (i + 1) % MAX_ORDERBOOK_SIZE) {
+            const next_idx = (i + 1) % MAX_ORDERBOOK_SIZE;
+            self.asks[i] = self.asks[next_idx];
         }
-
-        if (pos < self.ask_count - 1) {
-            var shift_i = pos;
-            while (shift_i < self.ask_count - 1) : (shift_i += 1) {
-                const from_idx = (self.ask_head + shift_i + 1) % MAX_ORDERBOOK_SIZE;
-                const to_idx = (self.ask_head + shift_i) % MAX_ORDERBOOK_SIZE;
-                self.asks[to_idx] = self.asks[from_idx];
-            }
-        }
-
         self.ask_count -= 1;
     }
 
