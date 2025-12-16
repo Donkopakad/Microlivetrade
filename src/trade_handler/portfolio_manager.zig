@@ -2,11 +2,13 @@ const std = @import("std");
 const types = @import("../types.zig");
 const symbol_map = @import("../symbol-map.zig");
 const trade_log = @import("trade_log.zig");
+const orderbook_log = @import("orderbook_log.zig");
 const SymbolMap = symbol_map.SymbolMap;
 const TradingSignal = types.TradingSignal;
 const SignalType = types.SignalType;
 const margin = @import("margin_enforcer.zig");
 const binance = @import("binance_futures_client.zig");
+const OrderbookLogger = orderbook_log.OrderbookLogger;
 
 pub const PositionSide = enum {
     none,
@@ -51,6 +53,8 @@ pub const PortfolioManager = struct {
 
     trade_logger: ?*trade_log.TradeLogger,
 
+    orderbook_logger: ?*OrderbookLogger,
+
     candle_duration_ns: i128,
 
     pub fn init(allocator: std.mem.Allocator, sym_map: *const SymbolMap, binance_client: *binance.BinanceFuturesClient) PortfolioManager {
@@ -68,6 +72,26 @@ pub const PortfolioManager = struct {
                 .last_skip_log_candle = std.StringHashMap(i128).init(allocator),
                 .margin_enforcer = margin.MarginEnforcer.init(allocator, true, binance_client),
                 .trade_logger = null,
+                .orderbook_logger = null,
+                .candle_duration_ns = 15 * 60 * 1_000_000_000,
+            };
+        };
+
+        var orderbook_logger: ?*OrderbookLogger = null;
+        orderbook_logger = OrderbookLogger.init(allocator, "orderbook_snapshots_5pct.csv") catch |err| {
+            std.log.err("Failed to initialize orderbook logger: {}", .{ err });
+            return PortfolioManager{
+                .allocator = allocator,
+                .symbol_map = sym_map,
+                .binance_client = binance_client,
+                .balance_usdt = 1000.0,
+                .fee_rate = 0.001,
+                .positions = std.StringHashMap(PortfolioPosition).init(allocator),
+                .last_traded_candle_start_ns = std.StringHashMap(i128).init(allocator),
+                .last_skip_log_candle = std.StringHashMap(i128).init(allocator),
+                .margin_enforcer = margin.MarginEnforcer.init(allocator, true, binance_client),
+                .trade_logger = logger,
+                .orderbook_logger = null,
                 .candle_duration_ns = 15 * 60 * 1_000_000_000,
             };
         };
@@ -104,6 +128,7 @@ pub const PortfolioManager = struct {
             .last_skip_log_candle = std.StringHashMap(i128).init(allocator),
             .margin_enforcer = margin.MarginEnforcer.init(allocator, true, binance_client),
             .trade_logger = logger,
+            .orderbook_logger = orderbook_logger,
             .candle_duration_ns = 15 * 60 * 1_000_000_000,
         };
     }
@@ -113,7 +138,9 @@ pub const PortfolioManager = struct {
         self.cleanupLastTraded();
         if (self.trade_logger) |logger| {
             logger.deinit();
-            self.allocator.destroy(logger);
+        }
+        if (self.orderbook_logger) |logger| {
+            logger.deinit();
         }
         self.positions.deinit();
         self.last_traded_candle_start_ns.deinit();
@@ -125,27 +152,115 @@ pub const PortfolioManager = struct {
         const price = try symbol_map.getLastClosePrice(self.symbol_map, signal.symbol_name);
         const candle_start_ns = self.currentCandleStart(signal.symbol_name, signal.timestamp);
 
-        // One-trade-per-symbol-per-candle guard
-        if (!self.canTradeThisCandle(signal.symbol_name, candle_start_ns)) {
-            // Only log once per symbol per candle
-            if (self.last_skip_log_candle.get(signal.symbol_name)) |prev_value| {
-                if (prev_value == candle_start_ns) {
-                    // We already logged this skip for this symbol in this candle; just skip silently
-                    return;
-                }
-            }
-
-            std.log.info("Skipping signal for {s}; already traded this candle", .{ signal.symbol_name });
-
-            // Record that we logged for this symbol+candle
-            try self.last_skip_log_candle.put(signal.symbol_name, candle_start_ns);
-            return;
-        }
+        self.logOrderbookSnapshot(signal, price, candle_start_ns) catch |err| {
+            std.log.warn("Failed to log orderbook snapshot for {s}: {}", .{ signal.symbol_name, err });
+        };
 
         switch (signal.signal_type) {
-            .BUY => self.executeBuy(signal, price, candle_start_ns),
-            .SELL => self.executeSell(signal, price, candle_start_ns),
+            .BUY => {},
+            .SELL => {},
             .HOLD => {},
+        }
+    }
+
+    fn logOrderbookSnapshot(self: *PortfolioManager, signal: TradingSignal, price: f64, candle_start_ns: i128) !void {
+        const candle_end_ns = candle_start_ns + self.candle_duration_ns;
+
+        const ohlc = symbol_map.getLastOhlc(self.symbol_map, signal.symbol_name) catch |err| {
+            std.log.warn("Skipping snapshot for {s}: failed to fetch OHLC: {}", .{ signal.symbol_name, err });
+            return;
+        };
+
+        const candle_open = ohlc.open_price;
+        const candle_high = ohlc.high_price;
+        const candle_low = ohlc.low_price;
+        const candle_last_price_at_signal = ohlc.close_price;
+
+        const rsi_14 = @as(f64, signal.rsi_value);
+
+        const sym_opt = self.symbol_map.get(signal.symbol_name);
+        if (sym_opt == null) {
+            std.log.warn("Skipping snapshot for {s}: symbol not found in map", .{ signal.symbol_name });
+            return;
+        }
+        const sym = sym_opt.?;
+
+        var bid_levels = [_]types.PriceLevel{types.PriceLevel{ .price = 0.0, .quantity = 0.0 }} ** types.MAX_ORDERBOOK_SIZE;
+        var ask_levels = [_]types.PriceLevel{types.PriceLevel{ .price = 0.0, .quantity = 0.0 }} ** types.MAX_ORDERBOOK_SIZE;
+
+        const bid_limit = if (sym.orderbook.bid_count > types.MAX_ORDERBOOK_SIZE) types.MAX_ORDERBOOK_SIZE else sym.orderbook.bid_count;
+        const ask_limit = if (sym.orderbook.ask_count > types.MAX_ORDERBOOK_SIZE) types.MAX_ORDERBOOK_SIZE else sym.orderbook.ask_count;
+
+        var i: usize = 0;
+        while (i < bid_limit) : (i += 1) {
+            const actual_idx = (sym.orderbook.bid_head + i) % types.MAX_ORDERBOOK_SIZE;
+            bid_levels[i] = sym.orderbook.bids[actual_idx];
+        }
+
+        i = 0;
+        while (i < ask_limit) : (i += 1) {
+            const actual_idx = (sym.orderbook.ask_head + i) % types.MAX_ORDERBOOK_SIZE;
+            ask_levels[i] = sym.orderbook.asks[actual_idx];
+        }
+
+        var bid_total_20: f64 = 0.0;
+        var ask_total_20: f64 = 0.0;
+        for (0..types.MAX_ORDERBOOK_SIZE) |idx| {
+            bid_total_20 += bid_levels[idx].quantity;
+            ask_total_20 += ask_levels[idx].quantity;
+        }
+
+        const denom = bid_total_20 + ask_total_20;
+        const imbalance: f64 = if (denom == 0) 0 else (bid_total_20 - ask_total_20) / denom;
+
+        const dominant_side: []const u8 = if (imbalance > 0.0)
+            "BIDS"
+        else if (imbalance < 0.0)
+            "ASKS"
+        else
+            "NEUTRAL";
+
+        const candle_open_price = sym.candle_open_price;
+        const current_price = sym.current_price;
+        const pct_change = if (candle_open_price == 0.0)
+            0.0
+        else
+            ((current_price - candle_open_price) / candle_open_price) * 100.0;
+
+        const direction: []const u8 = switch (signal.signal_type) {
+            .BUY => "UP_5",
+            .SELL => "DOWN_5",
+            .HOLD => "HOLD",
+        };
+
+        var buf: [64]u8 = undefined;
+        const event_time_iso = trade_log.formatTimestamp(signal.timestamp, &buf) catch |err| {
+            std.log.warn("Failed to format timestamp for {s}: {}", .{ signal.symbol_name, err });
+            return;
+        };
+
+        if (self.orderbook_logger) |logger| {
+            try logger.logSnapshot(
+                signal.timestamp,
+                event_time_iso,
+                signal.symbol_name,
+                direction,
+                pct_change,
+                price,
+                candle_start_ns,
+                candle_end_ns,
+                candle_open,
+                candle_high,
+                candle_low,
+                candle_last_price_at_signal,
+                rsi_14,
+                bid_total_20,
+                ask_total_20,
+                imbalance,
+                dominant_side,
+                &bid_levels,
+                &ask_levels,
+            );
         }
     }
 
