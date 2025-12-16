@@ -39,3 +39,21 @@ pub fn getLastClosePrice(self: *const SymbolMap, symbol: []const u8) GetPriceErr
         return GetPriceError.SymbolNotFound;
     }
 }
+
+/// Returns the most recent OHLC struct for the given symbol.
+/// This mirrors the logic of getLastClosePrice but returns the full OHLC.
+pub fn getLastOhlc(self: *const SymbolMap, symbol_name: []const u8) GetPriceError!types.OHLC {
+    if (self.get(symbol_name)) |sym| {
+        if (sym.count > 0) {
+            const latest_idx = if (sym.count == 15)
+                (sym.head + 15 - 1) % 15
+            else
+                (sym.head + sym.count - 1) % 15;
+            return sym.ticker_queue[latest_idx];
+        } else {
+            return GetPriceError.NoPriceDataAvailable;
+        }
+    } else {
+        return GetPriceError.SymbolNotFound;
+    }
+}
