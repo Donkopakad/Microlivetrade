@@ -79,7 +79,7 @@ pub const OrderbookLogger = struct {
         var writer = self.file.writer();
 
         try writer.print(
-            "{d},{s},{s},{s},{d:.6},{d:.6},{d},{d},{d:.6},{d:.6},{d:.6},{d:.6},{d:.6},{d:.6},{d:.6},{s}",
+            "{d},{s},{s},{s},{d:.6},{d:.6},{d},{d},{d:.6},{d:.6},{d:.6},{d:.6},{d:.6},{d:.6},{d:.6},{d:.6},{s}",
             .{
                 event_time_ns,
                 event_time_iso,
