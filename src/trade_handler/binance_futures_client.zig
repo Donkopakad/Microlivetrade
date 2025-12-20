@@ -13,6 +13,17 @@ pub const OrderResult = struct {
     status: []const u8,
 };
 
+pub const DepthLevel = struct {
+    price: f64,
+    quantity: f64,
+};
+
+pub const DepthSnapshot = struct {
+    last_update_id: i64,
+    bids: []DepthLevel,
+    asks: []DepthLevel,
+};
+
 pub const SymbolInfo = struct {
     step_size: f64,
     min_qty: f64,
@@ -440,6 +451,85 @@ pub const BinanceFuturesClient = struct {
         }
 
         return parsed_price;
+    }
+
+    pub fn getDepthSnapshot20(self: *BinanceFuturesClient, symbol: []const u8) !DepthSnapshot {
+        // Convenience wrapper to fetch the top 20 levels of order-book depth for a symbol.
+        return self.getDepthSnapshot(symbol, 20);
+    }
+
+    pub fn getDepthSnapshot(self: *BinanceFuturesClient, symbol: []const u8, limit: usize) !DepthSnapshot {
+        // Fetch a depth snapshot from Binance Futures, limited to the requested number of levels.
+        var url_buf = std.ArrayList(u8).init(self.allocator);
+        defer url_buf.deinit();
+
+        try url_buf.writer().print("{s}/fapi/v1/depth?symbol={s}&limit={d}", .{ base_url, symbol, limit });
+
+        const uri = try std.Uri.parse(url_buf.items);
+        var req = try self.http_client.open(.GET, uri, .{ .server_header_buffer = try self.allocator.alloc(u8, 8192) });
+        defer req.deinit();
+
+        try req.send();
+        try req.wait();
+
+        if (req.response.status != .ok) return error.DepthRequestFailed;
+
+        const body = try req.reader().readAllAlloc(self.allocator, 1024 * 1024);
+        defer self.allocator.free(body);
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, body, .{});
+        defer parsed.deinit();
+
+        const root = parsed.value;
+        const last_update_id_val = root.object.get("lastUpdateId") orelse return error.DepthRequestFailed;
+        if (last_update_id_val != .integer) return error.DepthRequestFailed;
+
+        const bids_val = root.object.get("bids") orelse return error.DepthRequestFailed;
+        const asks_val = root.object.get("asks") orelse return error.DepthRequestFailed;
+        if (bids_val != .array or asks_val != .array) return error.DepthRequestFailed;
+
+        const bid_len = @min(bids_val.array.items.len, limit);
+        const ask_len = @min(asks_val.array.items.len, limit);
+
+        var bids = try self.allocator.alloc(DepthLevel, bid_len);
+        errdefer self.allocator.free(bids);
+
+        var asks = try self.allocator.alloc(DepthLevel, ask_len);
+        errdefer self.allocator.free(asks);
+
+        var i: usize = 0;
+        while (i < bid_len) : (i += 1) {
+            const entry = bids_val.array.items[i];
+            if (entry != .array or entry.array.items.len < 2) return error.DepthRequestFailed;
+            const price_val = entry.array.items[0];
+            const qty_val = entry.array.items[1];
+            if (price_val != .string or qty_val != .string) return error.DepthRequestFailed;
+
+            const price = std.fmt.parseFloat(f64, price_val.string) catch return error.DepthRequestFailed;
+            const qty = std.fmt.parseFloat(f64, qty_val.string) catch return error.DepthRequestFailed;
+            bids[i] = DepthLevel{ .price = price, .quantity = qty };
+        }
+
+        i = 0;
+        while (i < ask_len) : (i += 1) {
+            const entry = asks_val.array.items[i];
+            if (entry != .array or entry.array.items.len < 2) return error.DepthRequestFailed;
+            const price_val = entry.array.items[0];
+            const qty_val = entry.array.items[1];
+            if (price_val != .string or qty_val != .string) return error.DepthRequestFailed;
+
+            const price = std.fmt.parseFloat(f64, price_val.string) catch return error.DepthRequestFailed;
+            const qty = std.fmt.parseFloat(f64, qty_val.string) catch return error.DepthRequestFailed;
+            asks[i] = DepthLevel{ .price = price, .quantity = qty };
+        }
+
+        return DepthSnapshot{ .last_update_id = last_update_id_val.integer, .bids = bids, .asks = asks };
+    }
+
+    pub fn freeDepthSnapshot(self: *BinanceFuturesClient, snapshot: DepthSnapshot) void {
+        // Caller-owned allocation helper for depth snapshots fetched via getDepthSnapshot*.
+        self.allocator.free(snapshot.bids);
+        self.allocator.free(snapshot.asks);
     }
 
     fn signedRequest(self: *BinanceFuturesClient, method: http.Method, path: []const u8, base_query: []const u8) ![]const u8 {
