@@ -204,22 +204,27 @@ pub const PortfolioManager = struct {
         }
         const sym = sym_opt.?;
 
+        const depth = self.binance_client.getDepthSnapshot20(signal.symbol_name) catch |err| {
+            std.log.warn("Skipping orderbook snapshot for {s}: depth request failed: {}", .{ signal.symbol_name, err });
+            return;
+        };
+        defer self.binance_client.freeDepthSnapshot(depth);
+
         var bid_levels = [_]types.PriceLevel{types.PriceLevel{ .price = 0.0, .quantity = 0.0 }} ** types.MAX_ORDERBOOK_SIZE;
         var ask_levels = [_]types.PriceLevel{types.PriceLevel{ .price = 0.0, .quantity = 0.0 }} ** types.MAX_ORDERBOOK_SIZE;
 
-        const bid_limit = if (sym.orderbook.bid_count > types.MAX_ORDERBOOK_SIZE) types.MAX_ORDERBOOK_SIZE else sym.orderbook.bid_count;
-        const ask_limit = if (sym.orderbook.ask_count > types.MAX_ORDERBOOK_SIZE) types.MAX_ORDERBOOK_SIZE else sym.orderbook.ask_count;
+        // Fill the fixed-width order-book arrays from the live depth snapshot rather than any cached state.
+        const bid_limit = if (depth.bids.len > types.MAX_ORDERBOOK_SIZE) types.MAX_ORDERBOOK_SIZE else depth.bids.len;
+        const ask_limit = if (depth.asks.len > types.MAX_ORDERBOOK_SIZE) types.MAX_ORDERBOOK_SIZE else depth.asks.len;
 
         var i: usize = 0;
         while (i < bid_limit) : (i += 1) {
-            const actual_idx = (sym.orderbook.bid_head + i) % types.MAX_ORDERBOOK_SIZE;
-            bid_levels[i] = sym.orderbook.bids[actual_idx];
+            bid_levels[i] = types.PriceLevel{ .price = depth.bids[i].price, .quantity = depth.bids[i].quantity };
         }
 
         i = 0;
         while (i < ask_limit) : (i += 1) {
-            const actual_idx = (sym.orderbook.ask_head + i) % types.MAX_ORDERBOOK_SIZE;
-            ask_levels[i] = sym.orderbook.asks[actual_idx];
+            ask_levels[i] = types.PriceLevel{ .price = depth.asks[i].price, .quantity = depth.asks[i].quantity };
         }
 
         var bid_total_20: f64 = 0.0;
