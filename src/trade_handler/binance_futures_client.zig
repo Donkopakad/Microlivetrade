@@ -34,11 +34,6 @@ pub const BinanceFuturesClient = struct {
 
     pub const base_url: []const u8 = "https://fapi.binance.com";
 
-    const SignedResponse = struct {
-        status: http.Status,
-        body: []const u8,
-    };
-
     pub fn initFromEnv(allocator: std.mem.Allocator) !BinanceFuturesClient {
         const api_key_opt = std.process.getEnvVarOwned(allocator, "BINANCE_FUTURES_API_KEY") catch null;
         const api_secret_opt = std.process.getEnvVarOwned(allocator, "BINANCE_FUTURES_API_SECRET") catch null;
@@ -71,11 +66,17 @@ pub const BinanceFuturesClient = struct {
     }
 
     pub fn deinit(self: *BinanceFuturesClient) void {
+        // Free owned keys in symbol_info (StringHashMap doesn't free keys)
+        var it = self.symbol_info.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.symbol_info.deinit();
+
         self.http_client.deinit();
         if (self.owns_api_key) self.allocator.free(self.api_key);
         if (self.owns_api_secret) self.allocator.free(self.api_secret);
         if (self.dry_run_reason) |msg| self.allocator.free(msg);
-        self.symbol_info.deinit();
     }
 
     pub fn isLive(self: *const BinanceFuturesClient) bool {
@@ -106,42 +107,18 @@ pub const BinanceFuturesClient = struct {
         return null;
     }
 
-    fn isNoNeedToChangeMarginType(self: *BinanceFuturesClient, body: []const u8) bool {
-        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, body, .{}) catch {
-            return false;
-        };
-        defer parsed.deinit();
-        const root = parsed.value;
-        const code_val = root.object.get("code") orelse return false;
-        return switch (code_val) {
-            .integer => |i| i == -4046,
-            .string => |s| (std.fmt.parseInt(i64, s, 10) catch 0) == -4046,
-            else => false,
-        };
-    }
-
     pub fn setMarginType(self: *BinanceFuturesClient, symbol: []const u8, margin_type: []const u8) !void {
         if (!self.enabled) return;
-
         var query_buf = std.ArrayList(u8).init(self.allocator);
         defer query_buf.deinit();
         try query_buf.writer().print("symbol={s}&marginType={s}", .{ symbol, margin_type });
 
-        const resp = try self.signedRequestDetailed(.POST, "/fapi/v1/marginType", query_buf.items);
-        defer self.allocator.free(resp.body);
-
-        if (resp.status == .ok or resp.status == .created or resp.status == .accepted) {
-            return;
-        }
-
-        // Treat -4046 as OK (already in that margin type)
-        if (self.isNoNeedToChangeMarginType(resp.body)) {
-            std.log.debug("Margin type already set for {s}; continuing", .{ symbol });
-            return;
-        }
-
-        self.logBinanceError("/fapi/v1/marginType", resp.body);
-        return error.BinanceError;
+        // signedRequest() will ignore -4046 for this endpoint automatically.
+        const body = self.signedRequest(.POST, "/fapi/v1/marginType", query_buf.items) catch |err| {
+            std.log.err("Failed to set margin type for {s}: {}", .{ symbol, err });
+            return err;
+        };
+        defer self.allocator.free(body);
     }
 
     pub fn setLeverage(self: *BinanceFuturesClient, symbol: []const u8, leverage: u8) !void {
@@ -155,6 +132,56 @@ pub const BinanceFuturesClient = struct {
         };
         defer self.allocator.free(body);
     }
+
+    // ------------------------------------------------------------------------
+    // fetch open position quantity for LONG / SHORT on a symbol
+    // ------------------------------------------------------------------------
+    pub fn fetchOpenPositionQty(
+        self: *BinanceFuturesClient,
+        symbol: []const u8,
+        position_side: PositionSide,
+    ) !f64 {
+        if (!self.enabled) return 0.0;
+
+        const body = try self.signedRequest(.GET, "/fapi/v2/positionRisk", "");
+        defer self.allocator.free(body);
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, body, .{});
+        defer parsed.deinit();
+
+        const root = parsed.value;
+        if (root != .array) return 0.0;
+
+        const target_side_str = switch (position_side) {
+            .long => "LONG",
+            .short => "SHORT",
+        };
+
+        for (root.array.items) |item| {
+            if (item != .object) continue;
+            const obj = item.object;
+
+            const sym_val = obj.get("symbol") orelse continue;
+            if (sym_val != .string) continue;
+            if (!std.mem.eql(u8, sym_val.string, symbol)) continue;
+
+            const side_val = obj.get("positionSide") orelse continue;
+            if (side_val != .string) continue;
+            if (!std.mem.eql(u8, side_val.string, target_side_str)) continue;
+
+            const amt_val = obj.get("positionAmt") orelse continue;
+            if (amt_val != .string) continue;
+
+            const raw_amt = std.fmt.parseFloat(f64, amt_val.string) catch 0.0;
+            return @abs(raw_amt);
+        }
+
+        return 0.0;
+    }
+
+    // ------------------------------------------------------------------------
+    // Public trading helpers
+    // ------------------------------------------------------------------------
 
     pub fn openLong(self: *BinanceFuturesClient, symbol: []const u8, usdt_notional: f64, leverage: f64) !OrderResult {
         return self.placeOrderWithNotional(symbol, usdt_notional, leverage, .buy, .long, false);
@@ -181,12 +208,10 @@ pub const BinanceFuturesClient = struct {
         position_side: PositionSide,
         reduce_only: bool,
     ) !OrderResult {
-        _ = leverage;
+        _ = leverage; // currently unused, kept for API compatibility
         if (!self.enabled) return error.LiveTradingDisabled;
-
         const price = try self.getMarkPrice(symbol);
         const qty = usdt_notional / price;
-
         return self.placeOrderWithQuantity(symbol, qty, side, position_side, reduce_only);
     }
 
@@ -200,9 +225,10 @@ pub const BinanceFuturesClient = struct {
     ) !OrderResult {
         if (!self.enabled) return error.LiveTradingDisabled;
         _ = try self.ensureSymbolInfo(symbol);
-        const mark_price = try self.getMarkPrice(symbol);
-        const norm_qty = try self.normalizeQuantity(symbol, quantity, mark_price, reduce_only);
+
+        const norm_qty = try self.normalizeQuantity(symbol, quantity, try self.getMarkPrice(symbol));
         const client_order_id = try self.generateClientOrderId(symbol, side, position_side, reduce_only);
+        errdefer self.allocator.free(client_order_id);
 
         var query_buf = std.ArrayList(u8).init(self.allocator);
         defer query_buf.deinit();
@@ -217,21 +243,18 @@ pub const BinanceFuturesClient = struct {
             .short => "SHORT",
         };
 
-        // ✅ IMPORTANT: Only send reduceOnly when true.
+        // ✅ IMPORTANT: Do NOT send reduceOnly.
+        // In Hedge Mode (positionSide=LONG/SHORT), Binance rejects reduceOnly with -1106.
         try query_buf.writer().print(
-            "symbol={s}&side={s}&type=MARKET&positionSide={s}&quantity={d:.8}",
-            .{ symbol, side_str, position_side_str, norm_qty },
+            "symbol={s}&side={s}&type=MARKET&positionSide={s}&quantity={d:.8}&newClientOrderId={s}",
+            .{ symbol, side_str, position_side_str, norm_qty, client_order_id },
         );
-
-        if (reduce_only) {
-            try query_buf.appendSlice("&reduceOnly=true");
-        }
-
-        try query_buf.writer().print("&newClientOrderId={s}", .{ client_order_id });
 
         const body = try self.signedRequest(.POST, "/fapi/v1/order", query_buf.items);
         defer self.allocator.free(body);
+
         const result = try self.parseOrderResult(body);
+
         self.allocator.free(client_order_id);
         return result;
     }
@@ -261,9 +284,11 @@ pub const BinanceFuturesClient = struct {
         var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, body, .{});
         defer parsed.deinit();
         const root = parsed.value;
+
         const order_id_val = root.object.get("orderId") orelse return error.ParseError;
         const client_order_val = root.object.get("clientOrderId") orelse return error.ParseError;
         const executed_qty_val = root.object.get("executedQty") orelse return error.ParseError;
+
         const avg_price_val = root.object.get("avgPrice");
         const cum_quote_val = root.object.get("cumQuote");
         const status_val = root.object.get("status");
@@ -317,7 +342,7 @@ pub const BinanceFuturesClient = struct {
         self.allocator.free(result.status);
     }
 
-    fn normalizeQuantity(self: *BinanceFuturesClient, symbol: []const u8, quantity: f64, price: f64, reduce_only: bool) !f64 {
+    fn normalizeQuantity(self: *BinanceFuturesClient, symbol: []const u8, quantity: f64, price: f64) !f64 {
         const info = try self.ensureSymbolInfo(symbol);
         const step = info.step_size;
         if (step <= 0) return error.InvalidStepSize;
@@ -327,13 +352,9 @@ pub const BinanceFuturesClient = struct {
         const steps = std.math.floor(steps_raw + eps);
         const adjusted_qty = steps * step;
 
-        if (adjusted_qty <= 0) return error.QuantityTooSmall;
-
-        // ✅ Only enforce minNotional/minQty for OPENING orders
-        if (!reduce_only) {
-            if ((adjusted_qty * price) < info.min_notional or adjusted_qty < info.min_qty) {
-                return error.QuantityTooSmall;
-            }
+        if (adjusted_qty <= 0) return error.InvalidQuantity;
+        if ((adjusted_qty * price) < info.min_notional or adjusted_qty < info.min_qty) {
+            return error.QuantityTooSmall;
         }
 
         const precision_width: usize = @intCast(info.quantity_precision);
@@ -356,7 +377,11 @@ pub const BinanceFuturesClient = struct {
         try url_buf.writer().print("{s}/fapi/v1/exchangeInfo?symbol={s}", .{ base_url, symbol });
 
         const uri = try std.Uri.parse(url_buf.items);
-        var req = try self.http_client.open(.GET, uri, .{ .server_header_buffer = try self.allocator.alloc(u8, 8192) });
+
+        const shb = try self.allocator.alloc(u8, 8192);
+        defer self.allocator.free(shb);
+
+        var req = try self.http_client.open(.GET, uri, .{ .server_header_buffer = shb });
         defer req.deinit();
 
         try req.send();
@@ -368,6 +393,7 @@ pub const BinanceFuturesClient = struct {
 
         var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, body, .{});
         defer parsed.deinit();
+
         const root = parsed.value;
         const symbols = root.object.get("symbols") orelse return error.ExchangeInfoFailed;
         if (symbols != .array) return error.ExchangeInfoFailed;
@@ -390,9 +416,7 @@ pub const BinanceFuturesClient = struct {
             var precision: u8 = default_precision;
 
             if (sym_obj.get("quantityPrecision")) |prec_val| {
-                if (prec_val == .integer) {
-                    precision = @intCast(prec_val.integer);
-                }
+                if (prec_val == .integer) precision = @intCast(prec_val.integer);
             }
 
             if (sym_obj.get("filters")) |filters_val| {
@@ -405,20 +429,14 @@ pub const BinanceFuturesClient = struct {
 
                         if (std.mem.eql(u8, filter_type.string, "LOT_SIZE")) {
                             if (fobj.get("stepSize")) |step_val| {
-                                if (step_val == .string) {
-                                    step_size = std.fmt.parseFloat(f64, step_val.string) catch step_size;
-                                }
+                                if (step_val == .string) step_size = std.fmt.parseFloat(f64, step_val.string) catch step_size;
                             }
                             if (fobj.get("minQty")) |min_qty_val| {
-                                if (min_qty_val == .string) {
-                                    min_qty = std.fmt.parseFloat(f64, min_qty_val.string) catch min_qty;
-                                }
+                                if (min_qty_val == .string) min_qty = std.fmt.parseFloat(f64, min_qty_val.string) catch min_qty;
                             }
                         } else if (std.mem.eql(u8, filter_type.string, "MIN_NOTIONAL")) {
                             if (fobj.get("notional")) |notional_val| {
-                                if (notional_val == .string) {
-                                    min_notional = std.fmt.parseFloat(f64, notional_val.string) catch min_notional;
-                                }
+                                if (notional_val == .string) min_notional = std.fmt.parseFloat(f64, notional_val.string) catch min_notional;
                             }
                         }
                     }
@@ -448,17 +466,19 @@ pub const BinanceFuturesClient = struct {
     fn getMarkPrice(self: *BinanceFuturesClient, symbol: []const u8) !f64 {
         var url_buf = std.ArrayList(u8).init(self.allocator);
         defer url_buf.deinit();
-
         try url_buf.writer().print("{s}/fapi/v1/ticker/price?symbol={s}", .{ base_url, symbol });
 
         const uri = try std.Uri.parse(url_buf.items);
-        var req = try self.http_client.open(.GET, uri, .{
-            .server_header_buffer = try self.allocator.alloc(u8, 4096),
-        });
+
+        const shb = try self.allocator.alloc(u8, 4096);
+        defer self.allocator.free(shb);
+
+        var req = try self.http_client.open(.GET, uri, .{ .server_header_buffer = shb });
         defer req.deinit();
 
         try req.send();
         try req.wait();
+
         if (req.response.status != .ok) return error.PriceRequestFailed;
 
         const body = try req.reader().readAllAlloc(self.allocator, 4096);
@@ -470,19 +490,12 @@ pub const BinanceFuturesClient = struct {
         const root = parsed.value;
         const price_val = root.object.get("price") orelse return error.PriceRequestFailed;
         if (price_val != .string) return error.PriceRequestFailed;
-
-        const parsed_price = std.fmt.parseFloat(f64, price_val.string) catch return error.PriceRequestFailed;
-
-        if (!(parsed_price > 0.0)) {
-            std.log.err("Received non-positive mark price for {s}: {d}", .{ symbol, parsed_price });
-            return error.PriceRequestFailed;
-        }
-
-        return parsed_price;
+        return std.fmt.parseFloat(f64, price_val.string);
     }
 
-    fn signedRequestDetailed(self: *BinanceFuturesClient, method: http.Method, path: []const u8, base_query: []const u8) !SignedResponse {
+    fn signedRequest(self: *BinanceFuturesClient, method: http.Method, path: []const u8, base_query: []const u8) ![]const u8 {
         const timestamp: i64 = @intCast(std.time.milliTimestamp());
+
         var query_buf = std.ArrayList(u8).init(self.allocator);
         defer query_buf.deinit();
 
@@ -490,7 +503,6 @@ pub const BinanceFuturesClient = struct {
             try query_buf.appendSlice(base_query);
             try query_buf.append('&');
         }
-
         try query_buf.writer().print("timestamp={d}&recvWindow={d}", .{ timestamp, self.recv_window });
 
         var sig_buf: [64]u8 = undefined;
@@ -499,14 +511,18 @@ pub const BinanceFuturesClient = struct {
         var url_buf = std.ArrayList(u8).init(self.allocator);
         defer url_buf.deinit();
         try url_buf.writer().print("{s}{s}?{s}&signature={s}", .{ base_url, path, query_buf.items, sig });
+
         const uri = try std.Uri.parse(url_buf.items);
 
         const extra_headers = [_]http.Header{
             .{ .name = "X-MBX-APIKEY", .value = self.api_key },
         };
 
+        const shb = try self.allocator.alloc(u8, 8192);
+        defer self.allocator.free(shb);
+
         var req = try self.http_client.open(method, uri, .{
-            .server_header_buffer = try self.allocator.alloc(u8, 8192),
+            .server_header_buffer = shb,
             .extra_headers = &extra_headers,
         });
         defer req.deinit();
@@ -515,19 +531,39 @@ pub const BinanceFuturesClient = struct {
         try req.wait();
 
         const body = try req.reader().readAllAlloc(self.allocator, 1024 * 1024);
-        return SignedResponse{ .status = req.response.status, .body = body };
-    }
 
-    fn signedRequest(self: *BinanceFuturesClient, method: http.Method, path: []const u8, base_query: []const u8) ![]const u8 {
-        const resp = try self.signedRequestDetailed(method, path, base_query);
+        if (req.response.status != .ok and req.response.status != .created and req.response.status != .accepted) {
+            // Special-case: marginType already set => Binance returns code -4046
+            if (std.mem.eql(u8, path, "/fapi/v1/marginType")) {
+                if (self.extractErrorCode(body)) |code| {
+                    if (code == -4046) {
+                        std.log.debug("Margin type already set for request {s}; ignoring Binance code -4046", .{path});
+                        return body; // treat as success; caller will free
+                    }
+                }
+            }
 
-        if (resp.status != .ok and resp.status != .created and resp.status != .accepted) {
-            self.logBinanceError(path, resp.body);
-            self.allocator.free(resp.body);
+            self.logBinanceError(path, body);
+            self.allocator.free(body);
             return error.BinanceError;
         }
 
-        return resp.body;
+        return body;
+    }
+
+    fn extractErrorCode(self: *BinanceFuturesClient, body: []const u8) ?i64 {
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, body, .{}) catch return null;
+        defer parsed.deinit();
+
+        const root = parsed.value;
+        if (root != .object) return null;
+        const code_val = root.object.get("code") orelse return null;
+
+        return switch (code_val) {
+            .integer => |i| @intCast(i),
+            .string => |s| std.fmt.parseInt(i64, s, 10) catch null,
+            else => null,
+        };
     }
 
     fn signQuery(self: *BinanceFuturesClient, query: []const u8, out_buf: *[64]u8) ![]const u8 {
@@ -535,7 +571,7 @@ pub const BinanceFuturesClient = struct {
         mac.update(query);
         var digest: [32]u8 = undefined;
         mac.final(&digest);
-        return std.fmt.bufPrint(out_buf, "{s}", .{std.fmt.fmtSliceHexLower(&digest)});
+        return std.fmt.bufPrint(out_buf, "{s}", .{ std.fmt.fmtSliceHexLower(&digest) });
     }
 
     fn logBinanceError(self: *BinanceFuturesClient, path: []const u8, body: []const u8) void {
@@ -544,26 +580,29 @@ pub const BinanceFuturesClient = struct {
             return;
         };
         defer parsed.deinit();
+
         const root = parsed.value;
         const code_val = root.object.get("code");
         const msg_val = root.object.get("msg");
+
         if (code_val != null or msg_val != null) {
             if (code_val) |cv| {
                 switch (cv) {
-                    .integer => std.log.err(
-                        "Binance error {s}: code {d} msg {s}",
-                        .{ path, cv.integer, if (msg_val != null and msg_val.? == .string) msg_val.?.string else "" },
-                    ),
-                    else => std.log.err(
-                        "Binance error {s}: msg {s}",
-                        .{ path, if (msg_val != null and msg_val.? == .string) msg_val.?.string else "" },
-                    ),
+                    .integer => std.log.err("Binance error {s}: code {d} msg {s}", .{
+                        path,
+                        cv.integer,
+                        if (msg_val != null and msg_val.? == .string) msg_val.?.string else "",
+                    }),
+                    else => std.log.err("Binance error {s}: msg {s}", .{
+                        path,
+                        if (msg_val != null and msg_val.? == .string) msg_val.?.string else "",
+                    }),
                 }
             } else {
-                std.log.err(
-                    "Binance error {s}: msg {s}",
-                    .{ path, if (msg_val != null and msg_val.? == .string) msg_val.?.string else "" },
-                );
+                std.log.err("Binance error {s}: msg {s}", .{
+                    path,
+                    if (msg_val != null and msg_val.? == .string) msg_val.?.string else "",
+                });
             }
         }
     }
