@@ -34,6 +34,11 @@ pub const BinanceFuturesClient = struct {
 
     pub const base_url: []const u8 = "https://fapi.binance.com";
 
+    const SignedResponse = struct {
+        status: http.Status,
+        body: []const u8,
+    };
+
     pub fn initFromEnv(allocator: std.mem.Allocator) !BinanceFuturesClient {
         const api_key_opt = std.process.getEnvVarOwned(allocator, "BINANCE_FUTURES_API_KEY") catch null;
         const api_secret_opt = std.process.getEnvVarOwned(allocator, "BINANCE_FUTURES_API_SECRET") catch null;
@@ -101,16 +106,42 @@ pub const BinanceFuturesClient = struct {
         return null;
     }
 
+    fn isNoNeedToChangeMarginType(self: *BinanceFuturesClient, body: []const u8) bool {
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, body, .{}) catch {
+            return false;
+        };
+        defer parsed.deinit();
+        const root = parsed.value;
+        const code_val = root.object.get("code") orelse return false;
+        return switch (code_val) {
+            .integer => |i| i == -4046,
+            .string => |s| (std.fmt.parseInt(i64, s, 10) catch 0) == -4046,
+            else => false,
+        };
+    }
+
     pub fn setMarginType(self: *BinanceFuturesClient, symbol: []const u8, margin_type: []const u8) !void {
         if (!self.enabled) return;
+
         var query_buf = std.ArrayList(u8).init(self.allocator);
         defer query_buf.deinit();
         try query_buf.writer().print("symbol={s}&marginType={s}", .{ symbol, margin_type });
-        const body = self.signedRequest(.POST, "/fapi/v1/marginType", query_buf.items) catch |err| {
-            std.log.err("Failed to set margin type for {s}: {}", .{ symbol, err });
-            return err;
-        };
-        defer self.allocator.free(body);
+
+        const resp = try self.signedRequestDetailed(.POST, "/fapi/v1/marginType", query_buf.items);
+        defer self.allocator.free(resp.body);
+
+        if (resp.status == .ok or resp.status == .created or resp.status == .accepted) {
+            return;
+        }
+
+        // Treat -4046 as OK (already in that margin type)
+        if (self.isNoNeedToChangeMarginType(resp.body)) {
+            std.log.debug("Margin type already set for {s}; continuing", .{ symbol });
+            return;
+        }
+
+        self.logBinanceError("/fapi/v1/marginType", resp.body);
+        return error.BinanceError;
     }
 
     pub fn setLeverage(self: *BinanceFuturesClient, symbol: []const u8, leverage: u8) !void {
@@ -150,7 +181,7 @@ pub const BinanceFuturesClient = struct {
         position_side: PositionSide,
         reduce_only: bool,
     ) !OrderResult {
-        _ = leverage; // currently unused, kept for API compatibility
+        _ = leverage;
         if (!self.enabled) return error.LiveTradingDisabled;
 
         const price = try self.getMarkPrice(symbol);
@@ -186,10 +217,17 @@ pub const BinanceFuturesClient = struct {
             .short => "SHORT",
         };
 
+        // ✅ IMPORTANT: Only send reduceOnly when true.
         try query_buf.writer().print(
-            "symbol={s}&side={s}&type=MARKET&positionSide={s}&quantity={d:.8}&reduceOnly={s}&newClientOrderId={s}",
-            .{ symbol, side_str, position_side_str, norm_qty, if (reduce_only) "true" else "false", client_order_id },
+            "symbol={s}&side={s}&type=MARKET&positionSide={s}&quantity={d:.8}",
+            .{ symbol, side_str, position_side_str, norm_qty },
         );
+
+        if (reduce_only) {
+            try query_buf.appendSlice("&reduceOnly=true");
+        }
+
+        try query_buf.writer().print("&newClientOrderId={s}", .{ client_order_id });
 
         const body = try self.signedRequest(.POST, "/fapi/v1/order", query_buf.items);
         defer self.allocator.free(body);
@@ -284,13 +322,14 @@ pub const BinanceFuturesClient = struct {
         const step = info.step_size;
         if (step <= 0) return error.InvalidStepSize;
 
-        // robust step rounding
         const steps_raw = quantity / step;
         const eps = 1e-9;
         const steps = std.math.floor(steps_raw + eps);
         const adjusted_qty = steps * step;
 
         if (adjusted_qty <= 0) return error.QuantityTooSmall;
+
+        // ✅ Only enforce minNotional/minQty for OPENING orders
         if (!reduce_only) {
             if ((adjusted_qty * price) < info.min_notional or adjusted_qty < info.min_qty) {
                 return error.QuantityTooSmall;
@@ -434,7 +473,6 @@ pub const BinanceFuturesClient = struct {
 
         const parsed_price = std.fmt.parseFloat(f64, price_val.string) catch return error.PriceRequestFailed;
 
-        // Safety: never trade with non-positive or NaN mark price
         if (!(parsed_price > 0.0)) {
             std.log.err("Received non-positive mark price for {s}: {d}", .{ symbol, parsed_price });
             return error.PriceRequestFailed;
@@ -443,7 +481,7 @@ pub const BinanceFuturesClient = struct {
         return parsed_price;
     }
 
-    fn signedRequest(self: *BinanceFuturesClient, method: http.Method, path: []const u8, base_query: []const u8) ![]const u8 {
+    fn signedRequestDetailed(self: *BinanceFuturesClient, method: http.Method, path: []const u8, base_query: []const u8) !SignedResponse {
         const timestamp: i64 = @intCast(std.time.milliTimestamp());
         var query_buf = std.ArrayList(u8).init(self.allocator);
         defer query_buf.deinit();
@@ -477,14 +515,19 @@ pub const BinanceFuturesClient = struct {
         try req.wait();
 
         const body = try req.reader().readAllAlloc(self.allocator, 1024 * 1024);
+        return SignedResponse{ .status = req.response.status, .body = body };
+    }
 
-        if (req.response.status != .ok and req.response.status != .created and req.response.status != .accepted) {
-            self.logBinanceError(path, body);
-            self.allocator.free(body);
+    fn signedRequest(self: *BinanceFuturesClient, method: http.Method, path: []const u8, base_query: []const u8) ![]const u8 {
+        const resp = try self.signedRequestDetailed(method, path, base_query);
+
+        if (resp.status != .ok and resp.status != .created and resp.status != .accepted) {
+            self.logBinanceError(path, resp.body);
+            self.allocator.free(resp.body);
             return error.BinanceError;
         }
 
-        return body;
+        return resp.body;
     }
 
     fn signQuery(self: *BinanceFuturesClient, query: []const u8, out_buf: *[64]u8) ![]const u8 {
