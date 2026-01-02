@@ -169,8 +169,8 @@ pub const BinanceFuturesClient = struct {
     ) !OrderResult {
         if (!self.enabled) return error.LiveTradingDisabled;
         _ = try self.ensureSymbolInfo(symbol);
-
-        const norm_qty = try self.normalizeQuantity(symbol, quantity, try self.getMarkPrice(symbol));
+        const mark_price = try self.getMarkPrice(symbol);
+        const norm_qty = try self.normalizeQuantity(symbol, quantity, mark_price, reduce_only);
         const client_order_id = try self.generateClientOrderId(symbol, side, position_side, reduce_only);
 
         var query_buf = std.ArrayList(u8).init(self.allocator);
@@ -186,10 +186,9 @@ pub const BinanceFuturesClient = struct {
             .short => "SHORT",
         };
 
-        // No reduceOnly parameter sent to Binance anymore.
         try query_buf.writer().print(
-            "symbol={s}&side={s}&type=MARKET&positionSide={s}&quantity={d:.8}&newClientOrderId={s}",
-            .{ symbol, side_str, position_side_str, norm_qty, client_order_id },
+            "symbol={s}&side={s}&type=MARKET&positionSide={s}&quantity={d:.8}&reduceOnly={s}&newClientOrderId={s}",
+            .{ symbol, side_str, position_side_str, norm_qty, if (reduce_only) "true" else "false", client_order_id },
         );
 
         const body = try self.signedRequest(.POST, "/fapi/v1/order", query_buf.items);
@@ -280,7 +279,7 @@ pub const BinanceFuturesClient = struct {
         self.allocator.free(result.status);
     }
 
-    fn normalizeQuantity(self: *BinanceFuturesClient, symbol: []const u8, quantity: f64, price: f64) !f64 {
+    fn normalizeQuantity(self: *BinanceFuturesClient, symbol: []const u8, quantity: f64, price: f64, reduce_only: bool) !f64 {
         const info = try self.ensureSymbolInfo(symbol);
         const step = info.step_size;
         if (step <= 0) return error.InvalidStepSize;
@@ -291,9 +290,11 @@ pub const BinanceFuturesClient = struct {
         const steps = std.math.floor(steps_raw + eps);
         const adjusted_qty = steps * step;
 
-        if (adjusted_qty <= 0) return error.InvalidQuantity;
-        if ((adjusted_qty * price) < info.min_notional or adjusted_qty < info.min_qty) {
-            return error.QuantityTooSmall;
+        if (adjusted_qty <= 0) return error.QuantityTooSmall;
+        if (!reduce_only) {
+            if ((adjusted_qty * price) < info.min_notional or adjusted_qty < info.min_qty) {
+                return error.QuantityTooSmall;
+            }
         }
 
         const precision_width: usize = @intCast(info.quantity_precision);
