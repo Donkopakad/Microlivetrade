@@ -357,11 +357,11 @@ pub const BinanceFuturesClient = struct {
         };
     }
 
-    pub fn freeOrderResult(self: *BinanceFuturesClient, result: OrderResult) void {
-        _ = self;
-        self.allocator.free(result.client_order_id);
-        self.allocator.free(result.status);
+   pub fn freeOrderResult(self: *BinanceFuturesClient, result: OrderResult) void {
+    self.allocator.free(result.client_order_id);
+    self.allocator.free(result.status);
     }
+
 
     // ------------------------------------------------------------------------
     // Quantity normalization
