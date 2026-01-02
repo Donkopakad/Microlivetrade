@@ -14,9 +14,9 @@ pub const PositionSide = enum {
     short,
 };
 
-// ✅ Fixed config: each trade uses 50 USDT notional with 5x leverage
+// ✅ Fixed config: each trade uses 50 USDT notional with 1x leverage
 const TRADE_NOTIONAL_USDT: f64 = 50.0; // position size per trade
-const TRADE_LEVERAGE: f64 = 1.0;        // 1x leverage
+const TRADE_LEVERAGE: f64 = 1.0;       // 1x leverage
 
 // Dust and exposure controls
 const DUST_NOTIONAL_THRESHOLD_USD: f64 = 1.0;
@@ -185,7 +185,7 @@ pub const PortfolioManager = struct {
             }
         }
 
-        // Dust cleanup at 15-minute boundaries (or whenever this routine runs)
+        // Dust cleanup (runs whenever this routine runs)
         var dust_it = self.positions.iterator();
         while (dust_it.next()) |entry| {
             const pos = entry.value_ptr;
@@ -208,6 +208,7 @@ pub const PortfolioManager = struct {
             }
         }
 
+        // Toggle logic around pivot entry price
         if (self.getOpenPositionSymbol()) |sym_name| {
             if (self.positions.getPtr(sym_name)) |pos| {
                 if (pos.is_open and pos.pivot_entry_price > 0.0 and now_ns < pos.candle_end_timestamp) {
@@ -215,7 +216,7 @@ pub const PortfolioManager = struct {
                         return;
                     };
 
-                    const epsilon = pos.pivot_entry_price * 0.0002;
+                    const epsilon = pos.pivot_entry_price * 0.0002; // 0.02% deadband
                     if (current_price > pos.pivot_entry_price + epsilon and pos.side != .long) {
                         self.flipPosition(pos, .long, current_price);
                     } else if (current_price < pos.pivot_entry_price - epsilon and pos.side != .short) {
@@ -315,21 +316,17 @@ pub const PortfolioManager = struct {
     }
 
     fn openPosition(self: *PortfolioManager, signal: TradingSignal, price: f64, side: PositionSide, candle_start_ns: i128) void {
-        // ✅ Fixed leverage & notional
-        const leverage: f64 = TRADE_LEVERAGE;                // 5x
-        const position_size_usdt: f64 = TRADE_NOTIONAL_USDT; // 125 USDT position
+        const leverage: f64 = TRADE_LEVERAGE;
+        const position_size_usdt: f64 = TRADE_NOTIONAL_USDT;
 
-        // Enforce global open position cap
         const open_positions = self.countOpenPositions();
         if (open_positions >= MAX_OPEN_POSITIONS) {
             std.log.warn("Max open positions ({d}) reached; ignoring signal for {s}", .{ MAX_OPEN_POSITIONS, signal.symbol_name });
             return;
         }
 
-        // Margin needed ≈ notional / leverage (≈ 25 USDT)
         const required_margin = position_size_usdt / leverage;
 
-        // In dry-run we enforce this check; in live trading Binance itself will reject if insufficient
         if (self.balance_usdt < required_margin and !self.binance_client.isLive()) {
             std.log.warn(
                 "Insufficient balance to open {s} {s}",
@@ -440,7 +437,7 @@ pub const PortfolioManager = struct {
             return;
         }
 
-        var toggle_signal = TradingSignal{
+        const toggle_signal = TradingSignal{
             .symbol_name = pos.symbol,
             .signal_type = if (desired_side == .long) SignalType.BUY else SignalType.SELL,
             .rsi_value = 0,
@@ -465,7 +462,6 @@ pub const PortfolioManager = struct {
         order_id: ?i64,
         pivot_entry_price: f64,
     ) void {
-        // Use symbol_name directly as the hash-map key (no optional issues).
         if (!self.positions.contains(signal.symbol_name)) {
             self.positions.put(signal.symbol_name, PortfolioPosition{
                 .symbol = signal.symbol_name,
@@ -494,7 +490,7 @@ pub const PortfolioManager = struct {
         pos.position_size_usdt = position_size_usdt;
         pos.is_open = true;
         pos.side = side;
-        pos.leverage = @floatCast(signal.leverage); // kept as-is; just for record
+        pos.leverage = @floatCast(signal.leverage);
         pos.order_id = order_id;
 
         if (self.trade_logger) |_| {
