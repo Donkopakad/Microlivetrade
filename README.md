@@ -36,38 +36,3 @@
 
 ### Quick example
 
-```
-timestamp_ms,symbol,open_price,last_price,percent_change
-1729462955000,BTCUSDT,68000.00,71400.00,5.00
-```
-
-1. `handleCsvLine()` parses the row and sees `percent_change = +5.00`.
-2. `evaluateCsvSignal()` creates a 1× leverage `.BUY` signal unless BTCUSDT is already long.
-3. `PortfolioManager.processSignal()` opens the futures long at the latest Binance price.
-4. If no opposite signal arrives, `checkStopLossConditions()` will auto-close the trade at the 15-minute mark so the position never leaks into the next candle.
-
-
----
-
-## Key Components
-
-- **`core/`** – Core HFT runtime loop, lock-free logic, signal dispatch.
-- **`signal_engine.zig`** – SIMD-powered, batched signal calculations.
-- **`statcalc/`** – GPU-based technical indicator computation.
-- **`trade_handler.zig`** – Portfolio and execution manager, thread-safe.
-- **`metrics.zig`** – Real-time metrics collection, lock-free load tracker.
-
----
-
-## Requirements
-
-- Zig (latest [master build](https://ziglang.org/download/))
-- CUDA Toolkit nvcc (>=release 12.8, V12.8.93)
-- AVX2-capable CPU (modern Intel or AMD)
-- Linux (tested on Gentoo Amd64)
-
----
-
-## Building
-
-Use the provided Makefile:
