@@ -27,10 +27,10 @@ pub const SignalEngine = struct {
     batch_mutex: std.Thread.Mutex,
     batch_condition: std.Thread.Condition,
 
-    pub fn init(allocator: std.mem.Allocator, symbol_map: *const SymbolMap, binance_client: *binance.BinanceFuturesClient) !SignalEngine {
+    pub fn init(allocator: std.mem.Allocator, symbol_map: *const SymbolMap, binance_client: *binance.BinanceFuturesClient, backend_preference: stat_calc_lib.BackendPreference) !SignalEngine {
         const device_id = try stat_calc_lib.selectBestCUDADevice();
         var stat_calc = try allocator.create(StatCalc);
-        stat_calc.* = try StatCalc.init(allocator, device_id);
+        stat_calc.* = try StatCalc.init(allocator, device_id, backend_preference);
         try stat_calc.getDeviceInfo();
         try stat_calc.warmUp();
 
