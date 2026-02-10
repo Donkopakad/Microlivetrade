@@ -12,10 +12,14 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     var enable_metrics = false;
+    var backend_preference = @import("stat_calc/lib.zig").BackendPreference.auto;
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--metrics"[0..]) or std.mem.eql(u8, arg, "metrics"[0..])) {
             enable_metrics = true;
-            break;
+        } else if (std.mem.eql(u8, arg, "--force-cpu"[0..])) {
+            backend_preference = .force_cpu;
+        } else if (std.mem.eql(u8, arg, "--force-gpu"[0..])) {
+            backend_preference = .force_gpu;
         }
     }
 
@@ -30,7 +34,7 @@ pub fn main() !void {
     var aggregator = try DataAggregator.init(enable_metrics, smp_allocator);
     defer aggregator.deinit();
 
-    var signal_engine = try SignalEngine.init(smp_allocator, aggregator.symbol_map, futures_client);
+    var signal_engine = try SignalEngine.init(smp_allocator, aggregator.symbol_map, futures_client, backend_preference);
     defer signal_engine.deinit();
 
     aggregator.connectToBinance() catch |err| {
