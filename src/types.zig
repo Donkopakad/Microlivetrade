@@ -378,11 +378,15 @@ pub const Symbol = struct {
         return self.ticker_queue[real_idx];
     }
 
-    pub fn initCandleWithPreviousClose(self: *Symbol, prev_close_price: f64, candle_start_ms: i64) void {
+    pub fn setOfficialCandleOpen(self: *Symbol, open_price: f64, candle_start_ms: i64) void {
         self.candle_start_time = candle_start_ms;
-        self.candle_open_price = prev_close_price;
-        self.current_price = prev_close_price;
+        self.candle_open_price = open_price;
         self.last_update_time = candle_start_ms;
+    }
+
+    pub fn initCandleWithPreviousClose(self: *Symbol, prev_close_price: f64, candle_start_ms: i64) void {
+        self.setOfficialCandleOpen(prev_close_price, candle_start_ms);
+        self.current_price = prev_close_price;
     }
 
     pub fn updateCurrentPrice(self: *Symbol, new_price: f64, update_time_ms: i64) void {
@@ -397,6 +401,8 @@ pub const Symbol = struct {
 
     pub fn startNewCandle(self: *Symbol, new_candle_start_ms: i64) void {
         self.candle_start_time = new_candle_start_ms;
-        self.candle_open_price = self.current_price;
+        // Do not synthesize an open from the first observed ticker; this is
+        // overwritten by the Binance kline stream official open.
+        self.candle_open_price = 0.0;
     }
 };

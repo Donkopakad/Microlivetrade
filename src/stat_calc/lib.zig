@@ -122,9 +122,6 @@ pub const StatCalc = struct {
     // the synthetic 15m bucket & open per index between calls.
     h_pct_device: GPUPercentageChangeDeviceBatch,
 
-    // First 15-minute synthetic candle from which we are allowed to trade.
-    // All buckets before this will return pct = 0.0 so no trades fire.
-    trading_start_bucket_ms: i64,
 
     pub fn init(allocator: std.mem.Allocator, device_id: c_int) !StatCalc {
         var calc = StatCalc{
@@ -134,21 +131,9 @@ pub const StatCalc = struct {
             .d_ohlc_batch = null,
             .d_pct_result = null,
             .h_pct_device = std.mem.zeroes(GPUPercentageChangeDeviceBatch),
-            .trading_start_bucket_ms = 0,
         };
 
-        // Decide from which synthetic 15m candle we are allowed to trade.
-        // If you start the bot at 12:07, current_bucket = 12:00 and
-        // trading_start_bucket_ms = 12:15.
-        const now_ms: i64 = @intCast(@divTrunc(std.time.nanoTimestamp(), 1_000_000));
-        const current_bucket_idx: i64 = @divTrunc(now_ms, 900_000);
-        const current_bucket_ms: i64 = current_bucket_idx * 900_000;
-        calc.trading_start_bucket_ms = current_bucket_ms + 900_000;
-
-        std.log.info(
-            "StatCalc: trading will start from 15m window starting at {d} ms",
-            .{calc.trading_start_bucket_ms},
-        );
+        std.log.info("StatCalc: using official Binance kline opens for 15m percentage changes", .{});
 
         try calc.initCUDADevice();
         try calc.allocateDeviceMemory();
@@ -308,73 +293,23 @@ pub const StatCalc = struct {
             }
         }
 
-        // NOTE: we DO NOT reset self.h_pct_device here.
-        // It keeps the previous bucket & open per index so that
-        // the synthetic 15m candle open is stable within the window.
-
-        // Wall-clock in ms
-        const now_ms: i64 = @intCast(@divTrunc(std.time.nanoTimestamp(), 1_000_000));
-        // 15 minutes = 900,000 ms → use this as our synthetic candle bucket
-        const bucket_index: i64 = @divTrunc(now_ms, 900_000);
-        const current_bucket_ms: i64 = bucket_index * 900_000;
-        const first_trading_bucket_ms: i64 = self.trading_start_bucket_ms;
-
         const num_to_process = num_symbols;
 
         for (0..num_to_process) |i| {
             const sym = symbols[i];
-
-            // Last known close from the 15-slot circular buffer
             const latest_idx: usize = if (sym.count == 0) 0 else (sym.head + 15 - 1) % 15;
-            const last_close_f64: f64 = if (sym.count == 0)
-                0.0
-            else
-                sym.ticker_queue[latest_idx].close_price;
-
-            // Prefer live tick (sym.current_price); fallback to last close
-            const current_price_f64: f64 = if (sym.current_price != 0.0)
-                sym.current_price
-            else
-                last_close_f64;
-
-            // Use h_pct_device.candle_timestamp[i] as the "bucket" marker.
-            const prev_bucket: i64 = self.h_pct_device.candle_timestamp[i];
-            var open_price_f64: f64 = @as(f64, self.h_pct_device.candle_open_price[i]);
-
-            if (prev_bucket != current_bucket_ms) {
-                // ✅ New 15-minute window:
-                // Fix the open price to the *current* price at the first batch tick
-                // inside this window (your “12:15:00” behaviour).
-                open_price_f64 = current_price_f64;
-                self.h_pct_device.candle_timestamp[i] = current_bucket_ms;
-                self.h_pct_device.candle_open_price[i] = @as(f32, @floatCast(open_price_f64));
-            } else if (open_price_f64 == 0.0) {
-                // Same window, but first time we see this symbol in this bucket
-                open_price_f64 = if (current_price_f64 != 0.0)
-                    current_price_f64
-                else if (sym.count > 0)
-                    sym.ticker_queue[(sym.head + 15 - sym.count) % 15].close_price
-                else
-                    0.0;
-
-                self.h_pct_device.candle_open_price[i] = @as(f32, @floatCast(open_price_f64));
-                self.h_pct_device.candle_timestamp[i] = current_bucket_ms;
-            }
-
-            const pct_raw: f64 = if (open_price_f64 != 0.0)
+            const last_close_f64: f64 = if (sym.count == 0) 0.0 else sym.ticker_queue[latest_idx].close_price;
+            const current_price_f64: f64 = if (sym.current_price != 0.0) sym.current_price else last_close_f64;
+            const open_price_f64: f64 = sym.candle_open_price;
+            const pct_final: f64 = if (open_price_f64 > 0.0)
                 ((current_price_f64 - open_price_f64) / open_price_f64) * 100.0
             else
                 0.0;
 
-            // 👇 Gating: before first_trading_bucket_ms → NO TRADES (pct = 0)
-            const pct_final: f64 = if (current_bucket_ms < first_trading_bucket_ms)
-                0.0
-            else
-                pct_raw;
-
             self.h_pct_device.percentage_change[i] = @as(f32, @floatCast(pct_final));
             self.h_pct_device.current_price[i] = @as(f32, @floatCast(current_price_f64));
-            // candle_open_price & candle_timestamp already set above
+            self.h_pct_device.candle_open_price[i] = @as(f32, @floatCast(open_price_f64));
+            self.h_pct_device.candle_timestamp[i] = sym.candle_start_time;
         }
 
         if (self.d_ohlc_batch == null) {

@@ -24,6 +24,15 @@ pub fn build(b: *std.Build) void {
     exe.addObjectFile(b.path("simd.o"));
 
     b.installArtifact(exe);
+    const strategy_tests = b.addTest(.{
+        .root_source_file = b.path("src/strategy.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_strategy_tests = b.addRunArtifact(strategy_tests);
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_strategy_tests.step);
+
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());

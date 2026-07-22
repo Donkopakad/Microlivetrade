@@ -114,34 +114,42 @@ pub const SignalEngine = struct {
 
     pub fn generateSignalsFromGpuResults(self: *SignalEngine, results: *GPUPercentageChangeResultBatch) !void {
         const now_ts: i128 = @intCast(std.time.nanoTimestamp());
+        var candidates = std.ArrayList(TradingSignal).init(self.allocator);
+        defer candidates.deinit();
+
         for (0..results.count) |i| {
             const pct = results.device.percentage_change[i];
             const symbol_name = results.symbols[i];
             if (symbol_name.len == 0) continue;
+            if (results.device.candle_open_price[i] <= 0.0) continue;
 
-            if (pct >= engine_types.BUY_THRESHOLD) {
-                const signal = TradingSignal{
+            if (pct >= engine_types.BUY_THRESHOLD or pct <= engine_types.SELL_THRESHOLD) {
+                const signal_type: SignalType = if (pct >= engine_types.BUY_THRESHOLD) .BUY else .SELL;
+                std.log.info(
+                    "Threshold crossed {s}: pct={d:.2}% official_open={d:.8} current={d:.8} candle_start_ms={d}",
+                    .{ symbol_name, pct, results.device.candle_open_price[i], results.device.current_price[i], results.device.candle_timestamp[i] },
+                );
+                try candidates.append(.{
                     .symbol_name = symbol_name,
-                    .signal_type = SignalType.BUY,
+                    .signal_type = signal_type,
                     .rsi_value = pct,
                     .orderbook_percentage = pct,
                     .timestamp = now_ts,
                     .signal_strength = @min(@abs(pct) / 20.0, 1.0),
-                    .leverage = 1.0,
-                };
-                try self.trade_handler.addSignal(signal);
-            } else if (pct <= engine_types.SELL_THRESHOLD) {
-                const signal = TradingSignal{
-                    .symbol_name = symbol_name,
-                    .signal_type = SignalType.SELL,
-                    .rsi_value = pct,
-                    .orderbook_percentage = pct,
-                    .timestamp = now_ts,
-                    .signal_strength = @min(@abs(pct) / 20.0, 1.0),
-                    .leverage = 1.0,
-                };
-                try self.trade_handler.addSignal(signal);
+                    .leverage = 5.0,
+                });
             }
         }
+
+        std.mem.sort(TradingSignal, candidates.items, {}, signalLessThan);
+        for (candidates.items) |signal| {
+            try self.trade_handler.addSignal(signal);
+        }
     }
+
+    fn signalLessThan(_: void, a: TradingSignal, b: TradingSignal) bool {
+        if (a.timestamp != b.timestamp) return a.timestamp < b.timestamp;
+        return std.mem.lessThan(u8, a.symbol_name, b.symbol_name);
+    }
+
 };

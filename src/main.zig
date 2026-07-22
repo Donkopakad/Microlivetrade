@@ -2,6 +2,7 @@ const DataAggregator = @import("data_aggregator/lib.zig").DataAggregator;
 const SignalEngine = @import("signal_engine/lib.zig").SignalEngine;
 const std = @import("std");
 const binance = @import("trade_handler/binance_futures_client.zig");
+const config = @import("config.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -19,8 +20,14 @@ pub fn main() !void {
         }
     }
 
+    const cfg = try config.Config.load(allocator);
+    cfg.logStartupSafety();
+
     var futures_client = try allocator.create(binance.BinanceFuturesClient);
     futures_client.* = try binance.BinanceFuturesClient.initFromEnv(allocator);
+    if (!cfg.realOrdersEnabled()) {
+        try futures_client.disableLive("Dry-run safety gate: LIVE_TRADING, confirmation, or credentials missing");
+    }
     defer {
         futures_client.deinit();
         allocator.destroy(futures_client);

@@ -17,6 +17,7 @@ pub const WSClient = struct {
 
     ticker_streams: std.ArrayList([]const u8),
     depth_streams: std.ArrayList([]const u8),
+    kline_streams: std.ArrayList([]const u8),
 
     allocator: std.mem.Allocator,
     ticker_handler: ?*TickerHandler = null,
@@ -33,6 +34,7 @@ pub const WSClient = struct {
 
             .ticker_streams = std.ArrayList([]const u8).init(allocator),
             .depth_streams = std.ArrayList([]const u8).init(allocator),
+            .kline_streams = std.ArrayList([]const u8).init(allocator),
 
             .allocator = allocator,
             .http_client = http.Client{ .allocator = allocator },
@@ -48,6 +50,8 @@ pub const WSClient = struct {
 
         for (self.depth_streams.items) |stream| self.allocator.free(stream);
         self.depth_streams.deinit();
+        for (self.kline_streams.items) |stream| self.allocator.free(stream);
+        self.kline_streams.deinit();
 
         if (self.depth_handler) |h| h.deinit();
         if (self.ticker_handler) |h| h.deinit();
@@ -89,14 +93,21 @@ pub const WSClient = struct {
             const ticker = try std.fmt.allocPrint(self.allocator, "{s}@miniTicker", .{sym_lower});
             try self.ticker_streams.append(ticker);
 
+            const kline = try std.fmt.allocPrint(self.allocator, "{s}@kline_15m", .{sym_lower});
+            try self.kline_streams.append(kline);
+
             const depth = try std.fmt.allocPrint(self.allocator, "{s}@depth", .{sym_lower});
             try self.depth_streams.append(depth);
         }
 
         // ---- SUBSCRIBE TICKER ----
+        var ticker_and_kline = std.ArrayList([]const u8).init(self.allocator);
+        defer ticker_and_kline.deinit();
+        try ticker_and_kline.appendSlice(self.ticker_streams.items);
+        try ticker_and_kline.appendSlice(self.kline_streams.items);
         const tmsg = .{
             .method = "SUBSCRIBE",
-            .params = self.ticker_streams.items,
+            .params = ticker_and_kline.items,
             .id = 1,
         };
         const tjson = try json.stringifyAlloc(self.allocator, tmsg, .{});

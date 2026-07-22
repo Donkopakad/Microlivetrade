@@ -1,73 +1,37 @@
-**MicroRush** is a high-performance, real-time high-frequency trading (HFT) engine written in [Zig](https://ziglang.org/). It is designed for ultra-low-latency signal processing and execution using cutting-edge system-level features.
+# MicroRush Zig Binance USDT-M Futures Bot
 
-## Features
+This branch implements the requested single-global-trade 15-minute momentum/toggle strategy in the Zig entrypoint `src/main.zig`.
 
-- **Ultra-Fast Signal Engine**  
-  SIMD-accelerated signal generation using AVX2 across multiple CPU cores and thread pools.
+## Strategy
 
-- **GPU-Accelerated Analytics**  
-  Real-time RSI, StochRSI, and order book metrics computed using CUDA kernels.
+- Universe: active Binance USDT-M futures symbols where `quoteAsset=USDT`, `contractType=PERPETUAL`, and `status=TRADING`.
+- Candle: fixed Binance 15-minute wall-clock candles (`@kline_15m`) with official kline open `k.o`; miniTicker provides current prices.
+- Signal: every batch, percentage is `((current_price - official_15m_open) / official_15m_open) * 100`.
+- Entry: +5% opens long; -5% opens short immediately.
+- Global trade rule: the signal handler and portfolio manager allow only one open position globally; deterministic batch ordering is timestamp then symbol.
+- Position: 1000 USDT notional, 5x isolated leverage. Live orders are disabled unless explicitly enabled.
+- Toggle: first actual fill (or dry-run fill) is fixed reference. Upper=`entry*1.001`; lower=`entry*0.999`. Price at/above upper must be long; price at/below lower must be short.
+- Exit: the active position is closed at the original 15-minute candle end.
 
-- **Lock-Free Queues**  
-  Inter-thread communication built with lock-free data structures to avoid contention.
+## Streams
 
-- **Multithreaded Execution Engine**  
-  Uses Zig’s thread pools and affinity pinning for high throughput and core-level balancing.
+- Official candle open: Binance Futures WebSocket `<symbol>@kline_15m`.
+- Current price for universe scans: Binance Futures WebSocket `<symbol>@miniTicker`.
+- Active trade monitoring: the same miniTicker-updated symbol map is checked approximately once per second, with REST fallback available through the futures client for live order pricing.
 
-- **Atomic Portfolio Management**  
-  All trade operations are lock-protected and atomic for safe concurrent access.
+## Safety
 
-- **Live Exchange Integration**  
-  Fetches real-time market data from **Binance** using WebSocket streams and REST APIs.
+Dry-run is the default. Do not put secrets in source control. To enable live trading, set credentials and:
 
-- **Balanced Load Metrics**  
-  `metrics.zig` implements core-optimized, lock-free load reporting for adaptive tuning and performance analysis.
-
-- **Built-in Benchmarking Tools**
-  Track system performance using built-in metrics collectors and CLI flags.
-
-## Binance futures percentage strategy
-
-- The data aggregator continuously dumps the 15-minute opening price, latest close, and computed percentage change for every subscribed symbol into `percent_changes_15m.csv`. Each row represents the "closing percentage" referenced by the trading rules.
-- The signal engine now tails that CSV feed directly. Every time a new row shows a symbol rallying **+5% or more**, the engine emits a `BUY` signal that opens/maintains a **1× leverage long** on Binance futures. When the CSV reports a symbol selling off **−5% or worse**, the engine emits a `SELL` signal that either opens or maintains a **1× leverage short**.
-- The portfolio manager tracks whether a symbol is long, short, or flat so opposite signals automatically close the current exposure before flipping direction.
-- Once a position opens, it is forcibly closed before the 15-minute candle finishes. The portfolio manager enforces a 15-minute hold limit so every trade is flattened within the same timeframe that generated it.
-- For a step-by-step explanation—with concrete CSV examples—see [`docs/trade_lifecycle.md`](docs/trade_lifecycle.md). That document walks through how `SignalEngine.generateSignalsFromCsv()` decides when to emit `TradingSignal`s, how `TradeHandler` prioritises them, and how `PortfolioManager` opens, sizes, and closes every position inside the current 15-minute window.
-
-### Quick example
-
-```
-timestamp_ms,symbol,open_price,last_price,percent_change
-1729462955000,BTCUSDT,68000.00,71400.00,5.00
+```bash
+export LIVE_TRADING=true
+export LIVE_TRADING_CONFIRM=I_UNDERSTAND_THIS_IS_LIVE
 ```
 
-1. `handleCsvLine()` parses the row and sees `percent_change = +5.00`.
-2. `evaluateCsvSignal()` creates a 1× leverage `.BUY` signal unless BTCUSDT is already long.
-3. `PortfolioManager.processSignal()` opens the futures long at the latest Binance price.
-4. If no opposite signal arrives, `checkStopLossConditions()` will auto-close the trade at the 15-minute mark so the position never leaks into the next candle.
+## Build
 
-
----
-
-## Key Components
-
-- **`core/`** – Core HFT runtime loop, lock-free logic, signal dispatch.
-- **`signal_engine.zig`** – SIMD-powered, batched signal calculations.
-- **`statcalc/`** – GPU-based technical indicator computation.
-- **`trade_handler.zig`** – Portfolio and execution manager, thread-safe.
-- **`metrics.zig`** – Real-time metrics collection, lock-free load tracker.
-
----
-
-## Requirements
-
-- Zig (latest [master build](https://ziglang.org/download/))
-- CUDA Toolkit nvcc (>=release 12.8, V12.8.93)
-- AVX2-capable CPU (modern Intel or AMD)
-- Linux (tested on Gentoo Amd64)
-
----
-
-## Building
-
-Use the provided Makefile:
+```bash
+zig build
+zig build test
+zig build run
+```

@@ -73,6 +73,12 @@ pub const BinanceFuturesClient = struct {
         self.symbol_info.deinit();
     }
 
+    pub fn disableLive(self: *BinanceFuturesClient, reason: []const u8) !void {
+        self.enabled = false;
+        if (self.dry_run_reason) |msg| self.allocator.free(msg);
+        self.dry_run_reason = try self.allocator.dupe(u8, reason);
+    }
+
     pub fn isLive(self: *const BinanceFuturesClient) bool {
         return self.enabled;
     }
@@ -181,14 +187,11 @@ pub const BinanceFuturesClient = struct {
             .sell => "SELL",
         };
 
-        const position_side_str = switch (position_side) {
-            .long => "LONG",
-            .short => "SHORT",
-        };
+        _ = position_side;
 
         try query_buf.writer().print(
-            "symbol={s}&side={s}&type=MARKET&positionSide={s}&quantity={d:.8}&reduceOnly={s}&newClientOrderId={s}",
-            .{ symbol, side_str, position_side_str, norm_qty, if (reduce_only) "true" else "false", client_order_id },
+            "symbol={s}&side={s}&type=MARKET&quantity={d:.8}&reduceOnly={s}&newClientOrderId={s}",
+            .{ symbol, side_str, norm_qty, if (reduce_only) "true" else "false", client_order_id },
         );
 
         const body = try self.signedRequest(.POST, "/fapi/v1/order", query_buf.items);
@@ -205,8 +208,9 @@ pub const BinanceFuturesClient = struct {
         position_side: PositionSide,
         reduce_only: bool,
     ) ![]const u8 {
-        return try std.fmt.allocPrint(self.allocator, "{s}_{s}_{s}_{s}", .{
+        return try std.fmt.allocPrint(self.allocator, "{s}_{d}_{s}_{s}_{s}", .{
             symbol,
+            std.time.milliTimestamp(),
             switch (side) {
                 .buy => "BUY",
                 .sell => "SELL",
