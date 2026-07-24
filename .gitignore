@@ -9,3 +9,5 @@ simd.o
 massif.*
 
 zig-pkg/
+
+logs/
