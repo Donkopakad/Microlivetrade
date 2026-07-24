@@ -95,9 +95,6 @@ pub const WSClient = struct {
 
             const kline = try std.fmt.allocPrint(self.allocator, "{s}@kline_15m", .{sym_lower});
             try self.kline_streams.append(kline);
-
-            const depth = try std.fmt.allocPrint(self.allocator, "{s}@depth", .{sym_lower});
-            try self.depth_streams.append(depth);
         }
 
         // ---- SUBSCRIBE TICKER ----
@@ -115,31 +112,15 @@ pub const WSClient = struct {
         try self.ticker_client.write(tjson);
 
         // ---- SUBSCRIBE DEPTH ----
-        const dmsg = .{
-            .method = "SUBSCRIBE",
-            .params = self.depth_streams.items,
-            .id = 2,
-        };
-        const djson = try json.stringifyAlloc(self.allocator, dmsg, .{});
-        defer self.allocator.free(djson);
-        try self.depth_client.write(djson);
 
         // ---- CREATE HANDLERS ----
         self.ticker_handler = try self.allocator.create(TickerHandler);
         self.ticker_handler.?.* = try TickerHandler.init(symbol_map, self.allocator, self.metrics_collector);
 
-        self.depth_handler = try self.allocator.create(DepthHandler);
-        self.depth_handler.?.* = try DepthHandler.init(symbol_map, self.allocator, &self.http_client, self.metrics_collector);
-
         // ---- START READ LOOPS IN THREADS ----
         _ = self.ticker_client.readLoopInNewThread(self.ticker_handler.?) catch |err| {
             std.log.err("Ticker WS loop crashed: {}", .{err});
             // TODO reconnectTicker()
-        };
-
-        _ = self.depth_client.readLoopInNewThread(self.depth_handler.?) catch |err| {
-            std.log.err("Depth WS loop crashed: {}", .{err});
-            // TODO reconnectDepth()
         };
     }
 
