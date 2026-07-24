@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("websocket", websocket_dep.module("websocket"));
 
     exe.addIncludePath(b.path("src/cuda/"));
-    exe.addLibraryPath(.{ .cwd_relative = "/opt/cuda/lib64" });
+    exe.addLibraryPath(.{ .cwd_relative = "/usr/lib/x86_64-linux-gnu" });
     exe.linkLibC();
     exe.linkSystemLibrary("cudart");
     exe.addObjectFile(b.path("kernel.o"));

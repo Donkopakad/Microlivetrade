@@ -187,8 +187,7 @@ pub const BinanceFuturesClient = struct {
             .sell => "SELL",
         };
 
-        _ = position_side;
-
+        
         try query_buf.writer().print(
             "symbol={s}&side={s}&type=MARKET&quantity={d:.8}&reduceOnly={s}&newClientOrderId={s}",
             .{ symbol, side_str, norm_qty, if (reduce_only) "true" else "false", client_order_id },

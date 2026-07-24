@@ -442,7 +442,7 @@ pub const PortfolioManager = struct {
             return;
         }
 
-        var toggle_signal = TradingSignal{
+        const toggle_signal = TradingSignal{
             .symbol_name = pos.symbol,
             .signal_type = if (desired_side == .long) SignalType.BUY else SignalType.SELL,
             .rsi_value = 0,
