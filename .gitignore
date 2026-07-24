@@ -7,3 +7,5 @@ simd.o
 .vscode
 
 massif.*
+
+zig-pkg/
