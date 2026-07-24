@@ -18,7 +18,9 @@ pub const TickerHandler = struct {
         return .{ .symbol_map = symbol_map, .allocator = allocator, .message_count = 0, .last_reset_time = std.time.milliTimestamp(), .metrics_collector = metrics_collector };
     }
 
-    pub fn deinit(self: *TickerHandler) void { _ = self; }
+    pub fn deinit(self: *TickerHandler) void {
+        _ = self;
+    }
 
     pub fn serverMessage(self: *TickerHandler, data: []u8, message_type: websocket.MessageType) !void {
         if (self.metrics_collector) |collector| {
@@ -33,7 +35,21 @@ pub const TickerHandler = struct {
         defer parsed.deinit();
         const root = parsed.value;
         if (root != .object) return;
-        if (root.object.get("k") != null) try self.handleKline(root) else try self.handleMiniTicker(root);
+        if (root.object.get("result") != null or root.object.get("code") != null) {
+            std.log.info("Binance WebSocket control response: {s}", .{data});
+            return;
+        }
+        self.message_count += 1;
+
+        if (self.message_count % 5000 == 0) {
+            std.log.info("Market-data heartbeat: received {d} ticker/kline messages", .{self.message_count});
+        }
+
+        if (root.object.get("k") != null) {
+            try self.handleKline(root);
+        } else {
+            try self.handleMiniTicker(root);
+        }
     }
 
     fn handleMiniTicker(self: *TickerHandler, root: json.Value) !void {
