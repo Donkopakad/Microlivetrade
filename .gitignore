@@ -11,3 +11,5 @@ massif.*
 zig-pkg/
 
 logs/
+market-data-venv/
+__pycache__/
