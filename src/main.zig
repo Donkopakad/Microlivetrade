@@ -12,7 +12,7 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    var enable_metrics = false;
+        var enable_metrics = false;
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--metrics"[0..]) or std.mem.eql(u8, arg, "metrics"[0..])) {
             enable_metrics = true;
@@ -37,17 +37,19 @@ pub fn main() !void {
     var aggregator = try DataAggregator.init(enable_metrics, smp_allocator);
     defer aggregator.deinit();
 
-    var signal_engine = try SignalEngine.init(smp_allocator, aggregator.symbol_map, futures_client);
-    defer signal_engine.deinit();
-
     aggregator.connectToBinance() catch |err| {
         std.log.err("Failed to connect to Binance or load symbols; aborting startup: {}", .{err});
         return;
     };
     try aggregator.run();
 
-    std.debug.print("WebSockets flowing, starting continuous Signal Engine and Trading...\n", .{});
+    if (!aggregator.waitUntilReady(120_000)) {
+        std.log.err("Binance Futures REST market-data readiness failed; signal processing and new-entry logic will not start", .{});
+        return;
+    }
 
+    var signal_engine = try SignalEngine.init(smp_allocator, aggregator.symbol_map, futures_client);
+    defer signal_engine.deinit();
     try signal_engine.run();
 
     std.log.info("Trading system is running continuously. Press Ctrl+C to terminate.", .{});
