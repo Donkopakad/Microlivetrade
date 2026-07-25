@@ -2,6 +2,7 @@ const binance = @import("binance.zig");
 const SymbolMap = @import("../symbol-map.zig").SymbolMap;
 const metrics = @import("../metrics.zig");
 const std = @import("std");
+const rest_market_data = @import("rest_market_data.zig");
 
 pub const DataAggregator = struct {
     symbol_map: *SymbolMap,
@@ -11,6 +12,7 @@ pub const DataAggregator = struct {
     metrics_channel: ?*metrics.MetricsChannel,
     metrics_thread: ?*std.Thread,
     metrics_collector: ?metrics.MetricsCollector,
+    rest_market_data: ?*rest_market_data.RestMarketData,
 
     pub fn init(enable_metrics: bool, allocator: std.mem.Allocator) !DataAggregator {
         var metrics_channel: ?*metrics.MetricsChannel = null;
@@ -38,14 +40,16 @@ pub const DataAggregator = struct {
             .metrics_collector = metrics_collector,
             .symbol_map = sym_map,
             .binance = binance_client,
+            .rest_market_data = null,
         };
     }
 
     pub fn deinit(self: *DataAggregator) void {
-        std.debug.print("WebSocket listener stopped\n", .{});
-        self.binance.ws_client.stopListener() catch |err| {
-            std.debug.print("Error stopping WebSocket listener: {}\n", .{err});
-        };
+        if (self.rest_market_data) |rest| {
+            rest.deinit();
+            self.allocator.destroy(rest);
+            self.rest_market_data = null;
+        }
 
         self.symbol_map.deinit();
         self.allocator.destroy(self.symbol_map);
@@ -72,7 +76,14 @@ pub const DataAggregator = struct {
     }
 
     pub fn run(self: *DataAggregator) !void {
-        try self.binance.ws_client.startListener(self.symbol_map);
-        std.debug.print("WebSocket listener started\n", .{});
+        const rest = try self.allocator.create(rest_market_data.RestMarketData);
+        errdefer self.allocator.destroy(rest);
+        rest.* = rest_market_data.RestMarketData.init(self.allocator, self.symbol_map, self.binance.selected_endpoint);
+        try rest.start();
+        self.rest_market_data = rest;
+    }
+
+    pub fn waitUntilReady(self: *DataAggregator, timeout_ms: u64) bool {
+        return if (self.rest_market_data) |rest| rest.waitUntilReady(timeout_ms) else false;
     }
 };
