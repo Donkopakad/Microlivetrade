@@ -11,7 +11,7 @@ const GPUPercentageChangeDeviceBatch = types.GPUPercentageChangeDeviceBatch;
 const GPUPercentageChangeResultBatch = types.GPUPercentageChangeResultBatch;
 const MAX_SYMBOLS = types.MAX_SYMBOLS;
 const GPUBatchResult = types.GPUBatchResult;
-
+const rest_market_data = @import("../data_aggregator/rest_market_data.zig");
 pub const KERNEL_SUCCESS = ERR.KernelError{ .code = 0, .message = "Success" };
 
 const CudaWrapper = struct {
@@ -297,11 +297,11 @@ pub const StatCalc = struct {
 
         for (0..num_to_process) |i| {
             const sym = symbols[i];
-            const latest_idx: usize = if (sym.count == 0) 0 else (sym.head + 15 - 1) % 15;
-            const last_close_f64: f64 = if (sym.count == 0) 0.0 else sym.ticker_queue[latest_idx].close_price;
-            const current_price_f64: f64 = if (sym.current_price != 0.0) sym.current_price else last_close_f64;
-            const open_price_f64: f64 = sym.candle_open_price;
-            const pct_final: f64 = if (open_price_f64 > 0.0)
+            onst now_ms = std.time.milliTimestamp();
+            const eligible = rest_market_data.symbolEligible(&sym, now_ms, sym.market_data_stale_ms);
+            const current_price_f64: f64 = if (eligible) sym.current_price else 0.0;
+            const open_price_f64: f64 = if (eligible) sym.candle_open_price else 0.0;
+            const pct_final: f64 = if (eligible)
                 ((current_price_f64 - open_price_f64) / open_price_f64) * 100.0
             else
                 0.0;
