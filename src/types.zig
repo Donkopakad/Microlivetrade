@@ -346,9 +346,14 @@ pub const Symbol = struct {
     orderbook: OrderBook,
 
     candle_start_time: i64,
+    candle_end_time: i64,
     candle_open_price: f64,
+    candle_close_price: f64,
     current_price: f64,
-    last_update_time: i64,
+    last_price_update_time: i64,
+    last_kline_update_time: i64,
+    candle_ready: bool,
+    market_data_stale_ms: u64,
 
     pub fn init() Symbol {
         return Symbol{
@@ -357,9 +362,14 @@ pub const Symbol = struct {
             .count = 0,
             .orderbook = OrderBook.init(),
             .candle_start_time = 0,
+            candle_end_time = 0,
             .candle_open_price = 0.0,
+            .candle_close_price = 0.0,
             .current_price = 0.0,
-            .last_update_time = 0,
+            .last_price_update_time = 0,
+            .last_kline_update_time = 0,
+            .candle_ready = false,
+            .market_data_stale_ms = 5000,
         };
     }
 
@@ -381,7 +391,7 @@ pub const Symbol = struct {
     pub fn setOfficialCandleOpen(self: *Symbol, open_price: f64, candle_start_ms: i64) void {
         self.candle_start_time = candle_start_ms;
         self.candle_open_price = open_price;
-        self.last_update_time = candle_start_ms;
+        self.candle_ready = open_price > 0.0;
     }
 
     pub fn initCandleWithPreviousClose(self: *Symbol, prev_close_price: f64, candle_start_ms: i64) void {
@@ -391,7 +401,7 @@ pub const Symbol = struct {
 
     pub fn updateCurrentPrice(self: *Symbol, new_price: f64, update_time_ms: i64) void {
         self.current_price = new_price;
-        self.last_update_time = update_time_ms;
+        self.last_price_update_time = update_time_ms;
     }
 
     pub fn getPercentageChange(self: *const Symbol) f64 {
@@ -404,5 +414,8 @@ pub const Symbol = struct {
         // Do not synthesize an open from the first observed ticker; this is
         // overwritten by the Binance kline stream official open.
         self.candle_open_price = 0.0;
+        self.candle_close_price = 0.0;
+        self.candle_end_time = 0;
+        self.candle_ready = false;
     }
 };
