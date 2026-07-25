@@ -122,7 +122,6 @@ pub const StatCalc = struct {
     // the synthetic 15m bucket & open per index between calls.
     h_pct_device: GPUPercentageChangeDeviceBatch,
 
-
     pub fn init(allocator: std.mem.Allocator, device_id: c_int) !StatCalc {
         var calc = StatCalc{
             .allocator = allocator,
@@ -297,7 +296,7 @@ pub const StatCalc = struct {
 
         for (0..num_to_process) |i| {
             const sym = symbols[i];
-            onst now_ms = std.time.milliTimestamp();
+            const now_ms = std.time.milliTimestamp();
             const eligible = rest_market_data.symbolEligible(&sym, now_ms, sym.market_data_stale_ms);
             const current_price_f64: f64 = if (eligible) sym.current_price else 0.0;
             const open_price_f64: f64 = if (eligible) sym.candle_open_price else 0.0;

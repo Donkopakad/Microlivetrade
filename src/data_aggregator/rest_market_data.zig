@@ -129,15 +129,48 @@ pub const RestMarketData = struct {
                 self.invalidateCandles(current_period);
                 const loaded = self.loadCurrentKlines(&client, current_period);
                 self.candle_ready_symbols.store(loaded, .seq_cst);
-                std.log.info("Loaded official 15m candles for {} of {} symbols", .{ loaded, self.symbol_map.count() });
+
+                std.log.info(
+                    "Loaded official 15m candles for {} of {} symbols",
+                    .{ loaded, self.symbol_map.count() },
+                );
+
                 if (loaded == self.symbol_map.count() and stats.matched > 0) {
+                    // Loading hundreds of klines can take more than the stale-price timeout.
+                    // Refresh all prices once more before declaring the feed ready.
+                    const refreshed_stats = self.fetchPrices(&client) catch |err| {
+                        _ = self.total_failures.fetchAdd(1, .seq_cst);
+                        std.log.warn(
+                            "Final Futures price refresh after kline loading failed: {}",
+                            .{err},
+                        );
+                        self.ready.store(false, .seq_cst);
+                        self.sleepInterruptible(retry_ms);
+                        continue;
+                    };
+
+                    self.last_price_success_ms.store(nowMs(), .seq_cst);
+                    self.matched_symbols.store(refreshed_stats.matched, .seq_cst);
+
+                    if (refreshed_stats.matched == 0) {
+                        std.log.warn(
+                            "Final Futures price refresh matched zero symbols; market data remains unready",
+                            .{},
+                        );
+                        self.ready.store(false, .seq_cst);
+                        continue;
+                    }
+
                     loaded_candle_period = current_period;
+
                     if (!self.ready.swap(true, .seq_cst)) {
-                        std.log.info("Binance Futures REST market data ready", .{});
+                        std.log.info(
+                            "Binance Futures REST market data ready after final price refresh",
+                            .{},
+                        );
                     }
                 }
             }
-
             const current = nowMs();
             const healthy = self.isHealthy();
             if (!healthy and !unhealthy_logged) {
@@ -225,8 +258,8 @@ pub const RestMarketData = struct {
     fn sleepInterruptible(self: *const RestMarketData, duration_ms: u64) void {
         var remaining = duration_ms;
         while (remaining > 0 and !self.shutdown.load(.seq_cst)) {
-            const part = @min(remaining, 100);
-            std.time.sleep(part * std.time.ns_per_ms);
+            const part: u64 = @min(remaining, 100);
+            std.time.sleep(part * @as(u64, std.time.ns_per_ms));
             remaining -= part;
         }
     }

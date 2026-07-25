@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
 
     const websocket_dep = b.dependency("websocket", .{});
 
- const exe = b.addExecutable(.{
+    const exe = b.addExecutable(.{
         .name = "MicroRush",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -31,7 +31,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_strategy_tests = b.addRunArtifact(strategy_tests);
     const market_data_tests = b.addTest(.{
-        .root_source_file = b.path("src/data_aggregator/rest_market_data.zig"),
+        .root_source_file = b.path("src/rest_market_data_test.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -39,7 +39,6 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_strategy_tests.step);
     test_step.dependOn(&run_market_data_tests.step);
-
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
