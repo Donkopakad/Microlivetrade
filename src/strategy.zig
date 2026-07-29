@@ -35,7 +35,9 @@ pub fn requiredSide(price: f64, levels: ToggleLevels, current: Side) Side {
     return current;
 }
 
-pub fn shouldExit(now_ms: i64, candle_end_ms: i64) bool { return now_ms >= candle_end_ms; }
+pub fn shouldExit(now_ms: i64, candle_end_ms: i64) bool {
+    return now_ms >= candle_end_ms;
+}
 
 pub fn lessThanCandidate(_: void, a: SignalCandidate, b: SignalCandidate) bool {
     if (a.timestamp_ms != b.timestamp_ms) return a.timestamp_ms < b.timestamp_ms;
@@ -53,8 +55,12 @@ pub const GlobalTradeLock = struct {
     pub fn tryAcquire(self: *GlobalTradeLock) bool {
         return self.value.cmpxchgStrong(0, 1, .seq_cst, .seq_cst) == null;
     }
-    pub fn release(self: *GlobalTradeLock) void { self.value.store(0, .seq_cst); }
-    pub fn isLocked(self: *GlobalTradeLock) bool { return self.value.load(.seq_cst) != 0; }
+    pub fn release(self: *GlobalTradeLock) void {
+        self.value.store(0, .seq_cst);
+    }
+    pub fn isLocked(self: *GlobalTradeLock) bool {
+        return self.value.load(.seq_cst) != 0;
+    }
 };
 
 pub const ReversalAction = enum { none, close_then_open_long, close_then_open_short };
@@ -74,9 +80,9 @@ test "+5% long signal and -5% short signal" {
     try std.testing.expectEqual(SignalDirection.short, signalFor(percentageChange(95, 100), 5, -5).?);
 }
 test "fixed upper and lower toggle calculations" {
-    const l = toggleLevels(100, 0.001);
-    try std.testing.expectApproxEqAbs(@as(f64, 100.1), l.upper, 0.000001);
-    try std.testing.expectApproxEqAbs(@as(f64, 99.9), l.lower, 0.000001);
+    const l = toggleLevels(100, 0.002);
+    try std.testing.expectApproxEqAbs(@as(f64, 100.2), l.upper, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 99.8), l.lower, 0.000001);
 }
 test "global single-trade lock" {
     var lock = GlobalTradeLock{};

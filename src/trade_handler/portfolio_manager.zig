@@ -15,8 +15,8 @@ pub const PositionSide = enum {
 };
 
 // ✅ Fixed config: each trade uses 50 USDT notional with 5x leverage
-const TRADE_NOTIONAL_USDT: f64 = 1000.0; // total position notional
-const TRADE_LEVERAGE: f64 = 5.0; // 5x isolated leverage
+const TRADE_NOTIONAL_USDT: f64 = 10.0; // total position notional
+const TRADE_LEVERAGE: f64 = 1.0; // 1x isolated leverage
 
 // Dust and exposure controls
 const DUST_NOTIONAL_THRESHOLD_USD: f64 = 1.0;
@@ -318,8 +318,8 @@ pub const PortfolioManager = struct {
 
     fn openPosition(self: *PortfolioManager, signal: TradingSignal, price: f64, side: PositionSide, candle_start_ns: i128) void {
         // ✅ Fixed leverage & notional
-        const leverage: f64 = TRADE_LEVERAGE; // 5x
-        const position_size_usdt: f64 = TRADE_NOTIONAL_USDT; // 125 USDT position
+        const leverage: f64 = TRADE_LEVERAGE; // 1x
+        const position_size_usdt: f64 = TRADE_NOTIONAL_USDT; // 10 USDT position
         if (!std.math.isFinite(price) or price <= 0.0) {
             std.log.err(
                 "Refusing to open {s} {s}: invalid entry price={d}",

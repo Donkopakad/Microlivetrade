@@ -46,12 +46,15 @@ pub const Client = struct {
 
     pub fn deinit(self: *Client) void {
         self.http_client.deinit();
-        self.ws_client.deinit();
+
+        // Public WebSocket market data is disabled for this REST-only strategy.
+        // Do not deinitialize the unused WebSocket client because it was never
+        // started and its library cleanup crashes on an uninitialized provider.
     }
 
     pub fn connect(self: *Client) !void {
         try self.selectBestEndpoint();
-        std.debug.print("Connecting to Binance using endpoint: {s}\n", .{ self.selected_endpoint });
+        std.debug.print("Connecting to Binance using endpoint: {s}\n", .{self.selected_endpoint});
     }
 
     pub fn loadSymbols(self: *Client, sym_map: *SymbolMap) !void {
@@ -71,19 +74,19 @@ pub const Client = struct {
         if (req.response.status != .ok) {
             std.log.err(
                 "Failed to load Binance Futures symbols from exchange info: HTTP status {d}",
-                .{ @intFromEnum(req.response.status) },
+                .{@intFromEnum(req.response.status)},
             );
             return error.ExchangeInfoRequestFailed;
         }
 
         const body = req.reader().readAllAlloc(self.allocator, 1024 * 1024 * 20) catch |err| {
-            std.log.err("Failed to read exchange info body: {}", .{ err });
+            std.log.err("Failed to read exchange info body: {}", .{err});
             return err;
         };
         defer self.allocator.free(body);
 
         self.parseAndStoreSymbols(body, sym_map) catch |err| {
-            std.log.err("Failed to load Binance Futures symbols from exchange info: {}", .{ err });
+            std.log.err("Failed to load Binance Futures symbols from exchange info: {}", .{err});
             return err;
         };
 
@@ -92,12 +95,12 @@ pub const Client = struct {
             return error.EmptySymbolUniverse;
         }
 
-        std.debug.print("Loaded {} symbols\n", .{ sym_map.count() });
+        std.debug.print("Loaded {} symbols\n", .{sym_map.count()});
     }
 
     fn parseAndStoreSymbols(self: *Client, json_data: []const u8, sym_map: *SymbolMap) !void {
         var parsed = json.parseFromSlice(json.Value, self.allocator, json_data, .{}) catch |err| {
-            std.log.err("Failed to parse JSON: {}", .{ err });
+            std.log.err("Failed to parse JSON: {}", .{err});
             return err;
         };
         defer parsed.deinit();
@@ -142,7 +145,7 @@ pub const Client = struct {
             .{ .endpoint = REST_ENDPOINTS[2] },
         };
 
-        std.debug.print("Testing ping for {} Binance REST_ENDPOINTS...\n", .{ REST_ENDPOINTS.len });
+        std.debug.print("Testing ping for {} Binance REST_ENDPOINTS...\n", .{REST_ENDPOINTS.len});
         for (&ping_results, 0..) |*result, i| {
             _ = i; // silence unused
             const ping_result = self.pingEndpoint(result.endpoint) catch |err| {
@@ -169,7 +172,7 @@ pub const Client = struct {
         } else {
             std.debug.print(
                 "All Binance Futures endpoints failed ping; falling back to {s}\n",
-                .{ REST_ENDPOINTS[0] },
+                .{REST_ENDPOINTS[0]},
             );
             self.selected_endpoint = REST_ENDPOINTS[0];
         }

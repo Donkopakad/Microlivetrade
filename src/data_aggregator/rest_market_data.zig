@@ -135,7 +135,12 @@ pub const RestMarketData = struct {
                     .{ loaded, self.symbol_map.count() },
                 );
 
-                if (loaded == self.symbol_map.count() and stats.matched > 0) {
+                const minimum_ready_symbols = @max(
+                    @as(usize, 1),
+                    self.symbol_map.count() / 2,
+                );
+
+                if (loaded >= minimum_ready_symbols and stats.matched > 0) {
                     // Loading hundreds of klines can take more than the stale-price timeout.
                     // Refresh all prices once more before declaring the feed ready.
                     const refreshed_stats = self.fetchPrices(&client) catch |err| {
@@ -219,9 +224,11 @@ pub const RestMarketData = struct {
                     continue;
                 };
                 if (candlePeriod(kline.start_ms) != expected_period) {
-                    _ = self.total_failures.fetchAdd(1, .seq_cst);
-                    std.log.warn("Ignoring old official 15m kline for {s}", .{entry.key_ptr.*});
-                    continue;
+                    std.log.debug(
+                        "Skipping {s}: no official kline for the current 15m period",
+                        .{entry.key_ptr.*},
+                    );
+                    break;
                 }
                 storeKline(entry.value_ptr, kline, nowMs());
                 loaded += 1;

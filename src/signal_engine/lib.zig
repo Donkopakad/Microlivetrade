@@ -136,7 +136,7 @@ pub const SignalEngine = struct {
                     .orderbook_percentage = pct,
                     .timestamp = now_ts,
                     .signal_strength = @min(@abs(pct) / 20.0, 1.0),
-                    .leverage = 5.0,
+                    .leverage = 1.0,
                 });
             }
         }
@@ -151,5 +151,4 @@ pub const SignalEngine = struct {
         if (a.timestamp != b.timestamp) return a.timestamp < b.timestamp;
         return std.mem.lessThan(u8, a.symbol_name, b.symbol_name);
     }
-
 };

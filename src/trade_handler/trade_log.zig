@@ -72,10 +72,7 @@ pub const TradeLogger = struct {
     // -------------------------------------------------------------------------
     fn writeHeader(self: *TradeLogger) !void {
         const header =
-            "event_time_utc,event_type,symbol,side,leverage,amount,position_size_usdt,"
-            ++ "fee_rate,entry_price,exit_price,candle_start_utc,candle_end_utc,"
-            ++ "candle_open,candle_high,candle_low,candle_close_at_entry,"
-            ++ "candle_close_at_exit,pnl_usdt,pct_entry,pct_exit\n";
+            "event_time_utc,event_type,symbol,side,leverage,amount,position_size_usdt," ++ "fee_rate,entry_price,exit_price,candle_start_utc,candle_end_utc," ++ "candle_open,candle_high,candle_low,candle_close_at_entry," ++ "candle_close_at_exit,pnl_usdt,pct_entry,pct_exit\n";
 
         try self.file.writeAll(header);
         try self.file.sync();
