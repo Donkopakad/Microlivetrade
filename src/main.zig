@@ -43,8 +43,8 @@ pub fn main() !void {
     };
     try aggregator.run();
 
-    if (!aggregator.waitUntilReady(120_000)) {
-        std.log.err("Binance Futures REST market-data readiness failed; signal processing and new-entry logic will not start", .{});
+    if (!aggregator.waitUntilReady(1_000_000)) {
+        std.log.err("Fresh-candle readiness timed out; signal processing and new-entry logic will not start", .{});
         return;
     }
 

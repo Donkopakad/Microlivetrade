@@ -15,7 +15,7 @@ pub const PositionSide = enum {
 };
 
 // ✅ Fixed config: each trade uses 50 USDT notional with 5x leverage
-const TRADE_NOTIONAL_USDT: f64 = 10.0; // total position notional
+const TRADE_NOTIONAL_USDT: f64 = 500.0; // total position notional
 const TRADE_LEVERAGE: f64 = 1.0; // 1x isolated leverage
 
 // Dust and exposure controls
@@ -215,8 +215,8 @@ pub const PortfolioManager = struct {
                         return;
                     };
 
-                    const upper = pos.pivot_entry_price * 1.001;
-                    const lower = pos.pivot_entry_price * 0.999;
+                    const upper = pos.pivot_entry_price * 1.002;
+                    const lower = pos.pivot_entry_price * 0.998;
                     std.log.info("Active price check {s}: price={d:.8} upper={d:.8} lower={d:.8}", .{ sym_name, current_price, upper, lower });
                     if (current_price >= upper and pos.side != .long) {
                         self.flipPosition(pos, .long, current_price);

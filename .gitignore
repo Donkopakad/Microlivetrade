@@ -13,3 +13,17 @@ zig-pkg/
 logs/
 market-data-venv/
 __pycache__/
+
+# Generated trading logs and reports
+*.log
+*.xlsx
+raw_*_dry_run.log
+timestamped_*_dry_run.log
+previous_runs/
+logs/
+zig-cache/
+.zig-cache/
+zig-out/
+
+# Local backups
+*_before_*.zig

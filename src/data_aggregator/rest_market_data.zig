@@ -8,6 +8,8 @@ const CANDLE_MS: i64 = 15 * 60 * 1000;
 const MAX_TICKER_BODY = 4 * 1024 * 1024;
 const MAX_KLINE_BODY = 64 * 1024;
 const HEARTBEAT_MS: i64 = 30_000;
+const FRESH_CANDLE_DELAY_MS: i64 = 5_000;
+const KLINE_WORKER_COUNT: usize = 16;
 
 pub const MarketDataError = error{
     HttpStatus,
@@ -29,6 +31,11 @@ const TickerStats = struct {
     returned: usize = 0,
     matched: usize = 0,
     ignored: usize = 0,
+};
+
+const StagedKline = struct {
+    symbol: []const u8,
+    kline: ?Kline = null,
 };
 
 pub const RestMarketData = struct {
@@ -105,8 +112,16 @@ pub const RestMarketData = struct {
 
         var retry_ms: u64 = 500;
         var loaded_candle_period: i64 = -1;
+        var target_period = candlePeriod(nowMs()) + 1;
+        var activation_ms = target_period * CANDLE_MS + FRESH_CANDLE_DELAY_MS;
         var last_heartbeat_ms = nowMs();
         var unhealthy_logged = false;
+
+        self.invalidateCandles(target_period);
+        std.log.info(
+            "Fresh-candle gate active: waiting until next 15m candle + 5 seconds (target_start_ms={d})",
+            .{target_period * CANDLE_MS},
+        );
 
         while (!self.shutdown.load(.seq_cst)) {
             const poll_started = nowMs();
@@ -120,35 +135,41 @@ pub const RestMarketData = struct {
             retry_ms = 500;
             self.last_price_success_ms.store(nowMs(), .seq_cst);
             self.matched_symbols.store(stats.matched, .seq_cst);
-            if (!self.ready.load(.seq_cst)) {
-                std.log.info("Loaded Futures prices for {} symbols", .{stats.matched});
+
+            const current = nowMs();
+            const current_period = candlePeriod(current);
+
+            // After the first completed cycle, immediately disable new entries at
+            // every 15-minute boundary. The portfolio manager can still use the
+            // continuously refreshed price to close the old position.
+            if (loaded_candle_period >= 0 and current_period != loaded_candle_period and target_period != current_period) {
+                target_period = current_period;
+                activation_ms = target_period * CANDLE_MS + FRESH_CANDLE_DELAY_MS;
+                self.invalidateCandles(target_period);
+                std.log.info(
+                    "New 15m candle detected; entries paused until +5 seconds (target_start_ms={d})",
+                    .{target_period * CANDLE_MS},
+                );
+            } else if (loaded_candle_period < 0 and current_period > target_period) {
+                // Handle a clock jump or a very long network pause before the first cycle.
+                target_period = current_period;
+                activation_ms = target_period * CANDLE_MS + FRESH_CANDLE_DELAY_MS;
+                self.invalidateCandles(target_period);
             }
 
-            const current_period = candlePeriod(nowMs());
-            if (current_period != loaded_candle_period) {
-                self.invalidateCandles(current_period);
-                const loaded = self.loadCurrentKlines(&client, current_period);
-                self.candle_ready_symbols.store(loaded, .seq_cst);
-
+            if (current >= activation_ms and loaded_candle_period != target_period) {
+                self.invalidateCandles(target_period);
+                const staged = self.loadCurrentKlinesConcurrent(target_period);
                 std.log.info(
-                    "Loaded official 15m candles for {} of {} symbols",
-                    .{ loaded, self.symbol_map.count() },
+                    "Staged official 15m candles for {} of {} symbols",
+                    .{ staged, self.symbol_map.count() },
                 );
 
-                const minimum_ready_symbols = @max(
-                    @as(usize, 1),
-                    self.symbol_map.count() / 2,
-                );
-
-                if (loaded >= minimum_ready_symbols and stats.matched > 0) {
-                    // Loading hundreds of klines can take more than the stale-price timeout.
-                    // Refresh all prices once more before declaring the feed ready.
+                const minimum_ready_symbols = @max(@as(usize, 1), self.symbol_map.count() / 2);
+                if (staged >= minimum_ready_symbols and stats.matched > 0) {
                     const refreshed_stats = self.fetchPrices(&client) catch |err| {
                         _ = self.total_failures.fetchAdd(1, .seq_cst);
-                        std.log.warn(
-                            "Final Futures price refresh after kline loading failed: {}",
-                            .{err},
-                        );
+                        std.log.warn("Final Futures price refresh after kline loading failed: {}", .{err});
                         self.ready.store(false, .seq_cst);
                         self.sleepInterruptible(retry_ms);
                         continue;
@@ -157,33 +178,35 @@ pub const RestMarketData = struct {
                     self.last_price_success_ms.store(nowMs(), .seq_cst);
                     self.matched_symbols.store(refreshed_stats.matched, .seq_cst);
 
-                    if (refreshed_stats.matched == 0) {
-                        std.log.warn(
-                            "Final Futures price refresh matched zero symbols; market data remains unready",
-                            .{},
-                        );
-                        self.ready.store(false, .seq_cst);
-                        continue;
+                    if (refreshed_stats.matched > 0) {
+                        const activated = self.activateStagedCandles(target_period);
+                        self.candle_ready_symbols.store(activated, .seq_cst);
+                        if (activated >= minimum_ready_symbols) {
+                            loaded_candle_period = target_period;
+                            self.ready.store(true, .seq_cst);
+                            std.log.info(
+                                "Fresh 15m cycle ready: activated {} symbols after boundary +5 seconds",
+                                .{activated},
+                            );
+                        } else {
+                            self.ready.store(false, .seq_cst);
+                            std.log.warn("Fresh candle activation below minimum; entries remain disabled", .{});
+                        }
                     }
-
-                    loaded_candle_period = current_period;
-
-                    if (!self.ready.swap(true, .seq_cst)) {
-                        std.log.info(
-                            "Binance Futures REST market data ready after final price refresh",
-                            .{},
-                        );
-                    }
+                } else {
+                    self.ready.store(false, .seq_cst);
+                    std.log.warn("Fresh candle staging below minimum; entries remain disabled", .{});
                 }
             }
-            const current = nowMs();
+
             const healthy = self.isHealthy();
             if (!healthy and !unhealthy_logged) {
-                std.log.warn("Binance Futures REST market-data feed is stale; suppressing new entries", .{});
+                std.log.warn("Binance Futures REST market-data feed is not trade-ready; suppressing new entries", .{});
                 unhealthy_logged = true;
             } else if (healthy) {
                 unhealthy_logged = false;
             }
+
             if (current - last_heartbeat_ms >= HEARTBEAT_MS) {
                 const last = self.last_price_success_ms.load(.seq_cst);
                 std.log.info(
@@ -194,7 +217,9 @@ pub const RestMarketData = struct {
             }
 
             const elapsed = nowMs() - poll_started;
-            if (elapsed < @as(i64, @intCast(self.poll_ms))) self.sleepInterruptible(self.poll_ms - @as(u64, @intCast(elapsed)));
+            if (elapsed < @as(i64, @intCast(self.poll_ms))) {
+                self.sleepInterruptible(self.poll_ms - @as(u64, @intCast(elapsed)));
+            }
         }
     }
 
@@ -206,37 +231,107 @@ pub const RestMarketData = struct {
         return parseTickerResponse(self.allocator, body, self.symbol_map, nowMs());
     }
 
-    fn loadCurrentKlines(self: *RestMarketData, client: *std.http.Client, expected_period: i64) usize {
-        var loaded: usize = 0;
-        var iterator = self.symbol_map.iterator();
-        while (iterator.next()) |entry| {
-            if (self.shutdown.load(.seq_cst)) break;
-            if (entry.value_ptr.candle_ready and candlePeriod(entry.value_ptr.candle_start_time) == expected_period) {
-                loaded += 1;
+    const KlineLoadContext = struct {
+        owner: *RestMarketData,
+        symbols: []const []const u8,
+        results: []StagedKline,
+        next_index: *std.atomic.Value(usize),
+        expected_period: i64,
+    };
+
+    fn klineWorker(ctx: *KlineLoadContext) void {
+        var client = std.http.Client{ .allocator = ctx.owner.allocator };
+        defer client.deinit();
+
+        while (!ctx.owner.shutdown.load(.seq_cst)) {
+            const index = ctx.next_index.fetchAdd(1, .seq_cst);
+            if (index >= ctx.symbols.len) break;
+
+            const symbol = ctx.symbols[index];
+            const kline = ctx.owner.fetchKline(&client, symbol) catch |err| {
+                _ = ctx.owner.total_failures.fetchAdd(1, .seq_cst);
+                std.log.warn("Official 15m kline request failed for {s}: {}", .{ symbol, err });
+                continue;
+            };
+
+            if (candlePeriod(kline.start_ms) != ctx.expected_period) {
+                std.log.debug("Skipping {s}: no official kline for the current 15m period", .{symbol});
                 continue;
             }
-            var attempts: usize = 0;
-            while (attempts < 3) : (attempts += 1) {
-                const kline = self.fetchKline(client, entry.key_ptr.*) catch |err| {
-                    _ = self.total_failures.fetchAdd(1, .seq_cst);
-                    std.log.warn("Official 15m kline request failed for {s}: {}", .{ entry.key_ptr.*, err });
-                    self.sleepInterruptible(@min(@as(u64, 250) << @as(u6, @intCast(attempts)), 1000));
-                    continue;
-                };
-                if (candlePeriod(kline.start_ms) != expected_period) {
-                    std.log.debug(
-                        "Skipping {s}: no official kline for the current 15m period",
-                        .{entry.key_ptr.*},
-                    );
-                    break;
+
+            ctx.results[index].kline = kline;
+        }
+    }
+
+    fn loadCurrentKlinesConcurrent(self: *RestMarketData, expected_period: i64) usize {
+        const symbol_count = self.symbol_map.count();
+        if (symbol_count == 0) return 0;
+
+        const symbols = self.allocator.alloc([]const u8, symbol_count) catch return 0;
+        defer self.allocator.free(symbols);
+        const results = self.allocator.alloc(StagedKline, symbol_count) catch return 0;
+        defer self.allocator.free(results);
+
+        var iterator = self.symbol_map.iterator();
+        var index: usize = 0;
+        while (iterator.next()) |entry| : (index += 1) {
+            symbols[index] = entry.key_ptr.*;
+            results[index] = .{ .symbol = entry.key_ptr.*, .kline = null };
+        }
+
+        var next_index = std.atomic.Value(usize).init(0);
+        var context = KlineLoadContext{
+            .owner = self,
+            .symbols = symbols,
+            .results = results,
+            .next_index = &next_index,
+            .expected_period = expected_period,
+        };
+
+        const worker_count = @min(KLINE_WORKER_COUNT, symbol_count);
+        const threads = self.allocator.alloc(std.Thread, worker_count) catch return 0;
+        defer self.allocator.free(threads);
+
+        var started: usize = 0;
+        while (started < worker_count) : (started += 1) {
+            threads[started] = std.Thread.spawn(.{}, klineWorker, .{&context}) catch break;
+        }
+        for (threads[0..started]) |thread| thread.join();
+
+        // Stage fields while candle_ready remains false. This prevents the signal
+        // engine from seeing partially initialized candle data.
+        var loaded: usize = 0;
+        for (results) |result| {
+            if (result.kline) |kline| {
+                if (self.symbol_map.getPtr(result.symbol)) |symbol| {
+                    symbol.candle_ready = false;
+                    symbol.candle_start_time = kline.start_ms;
+                    symbol.candle_end_time = kline.end_ms;
+                    symbol.candle_open_price = kline.open;
+                    symbol.candle_close_price = kline.close;
+                    symbol.last_kline_update_time = 0;
+                    loaded += 1;
                 }
-                storeKline(entry.value_ptr, kline, nowMs());
-                loaded += 1;
-                break;
             }
-            self.sleepInterruptible(25);
         }
         return loaded;
+    }
+
+    fn activateStagedCandles(self: *RestMarketData, expected_period: i64) usize {
+        const timestamp = nowMs();
+        var activated: usize = 0;
+        var iterator = self.symbol_map.iterator();
+        while (iterator.next()) |entry| {
+            const symbol = entry.value_ptr;
+            if (candlePeriod(symbol.candle_start_time) == expected_period and
+                std.math.isFinite(symbol.candle_open_price) and symbol.candle_open_price > 0)
+            {
+                symbol.last_kline_update_time = timestamp;
+                symbol.candle_ready = true;
+                activated += 1;
+            }
+        }
+        return activated;
     }
 
     fn fetchKline(self: *RestMarketData, client: *std.http.Client, symbol: []const u8) !Kline {
@@ -248,17 +343,17 @@ pub const RestMarketData = struct {
     }
 
     fn invalidateCandles(self: *RestMarketData, expected_period: i64) void {
+        _ = expected_period;
         var iterator = self.symbol_map.iterator();
         while (iterator.next()) |entry| {
-            if (candlePeriod(entry.value_ptr.candle_start_time) != expected_period) {
-                entry.value_ptr.candle_ready = false;
-                entry.value_ptr.candle_open_price = 0;
-                entry.value_ptr.candle_close_price = 0;
-                entry.value_ptr.candle_start_time = 0;
-                entry.value_ptr.candle_end_time = 0;
-                entry.value_ptr.last_kline_update_time = 0;
-            }
+            entry.value_ptr.candle_ready = false;
+            entry.value_ptr.candle_open_price = 0;
+            entry.value_ptr.candle_close_price = 0;
+            entry.value_ptr.candle_start_time = 0;
+            entry.value_ptr.candle_end_time = 0;
+            entry.value_ptr.last_kline_update_time = 0;
         }
+        self.candle_ready_symbols.store(0, .seq_cst);
         self.ready.store(false, .seq_cst);
     }
 
