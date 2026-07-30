@@ -127,7 +127,10 @@ pub const PortfolioManager = struct {
 
     pub fn processSignal(self: *PortfolioManager, signal: TradingSignal) !void {
         const price = try symbol_map.getLastClosePrice(self.symbol_map, signal.symbol_name);
-        const candle_start_ns = self.currentCandleStart(signal.symbol_name, signal.timestamp);
+        const candle_start_ns = if (signal.entry_candle_start_ns > 0)
+            signal.entry_candle_start_ns
+        else
+            self.currentCandleStart(signal.symbol_name, signal.timestamp);
 
         if (self.getOpenPositionSymbol()) |open_symbol| {
             if (!std.mem.eql(u8, open_symbol, signal.symbol_name)) {
@@ -411,7 +414,11 @@ pub const PortfolioManager = struct {
             return;
         }
 
-        const candle_end_ns = candle_start_ns + self.candle_duration_ns;
+        const candle_end_ns = if (signal.entry_candle_end_ns > candle_start_ns)
+            signal.entry_candle_end_ns
+        else
+            candle_start_ns + self.candle_duration_ns;
+        const strategy_pivot = if (signal.pivot_price > 0.0) signal.pivot_price else price;
 
         if (self.binance_client.isLive()) {
             if (side == .long) {
@@ -424,7 +431,7 @@ pub const PortfolioManager = struct {
                 const amount = if (order.executed_qty > 0) order.executed_qty else position_size_usdt / price;
                 const entry_price = if (order.avg_price > 0) order.avg_price else price;
                 const actual_notional = if (order.cum_quote > 0) order.cum_quote else position_size_usdt;
-                self.recordPosition(signal, side, amount, entry_price, candle_start_ns, candle_end_ns, actual_notional, order.order_id, entry_price);
+                self.recordPosition(signal, side, amount, entry_price, candle_start_ns, candle_end_ns, actual_notional, order.order_id, strategy_pivot);
                 self.markCandleTraded(signal.symbol_name, candle_start_ns);
                 std.log.info("Opened LONG on Binance {s} orderId={} qty={d:.6} price=${d:.4}", .{ signal.symbol_name, order.order_id, amount, entry_price });
             } else {
@@ -437,13 +444,13 @@ pub const PortfolioManager = struct {
                 const amount = if (order.executed_qty > 0) order.executed_qty else position_size_usdt / price;
                 const entry_price = if (order.avg_price > 0) order.avg_price else price;
                 const actual_notional = if (order.cum_quote > 0) order.cum_quote else position_size_usdt;
-                self.recordPosition(signal, side, amount, entry_price, candle_start_ns, candle_end_ns, actual_notional, order.order_id, entry_price);
+                self.recordPosition(signal, side, amount, entry_price, candle_start_ns, candle_end_ns, actual_notional, order.order_id, strategy_pivot);
                 self.markCandleTraded(signal.symbol_name, candle_start_ns);
                 std.log.info("Opened SHORT on Binance {s} orderId={} qty={d:.6} price=${d:.4}", .{ signal.symbol_name, order.order_id, amount, entry_price });
             }
         } else {
             const amount = position_size_usdt / price;
-            self.recordPosition(signal, side, amount, price, candle_start_ns, candle_end_ns, position_size_usdt, null, price);
+            self.recordPosition(signal, side, amount, price, candle_start_ns, candle_end_ns, position_size_usdt, null, strategy_pivot);
             self.markCandleTraded(signal.symbol_name, candle_start_ns);
             std.log.info("Opened simulated {s} {s} qty={d:.6} price=${d:.4}", .{ (if (side == .long) "LONG" else "SHORT"), signal.symbol_name, amount, price });
         }

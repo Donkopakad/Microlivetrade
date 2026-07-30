@@ -12,6 +12,11 @@ pub const TradingSignal = struct {
     timestamp: i128,
     signal_strength: f32,
     leverage: f32,
+    // Strategy-provided fixed midpoint and exact entry-candle boundaries.
+    // Defaults preserve compatibility with older signal producers.
+    pivot_price: f64 = 0.0,
+    entry_candle_start_ns: i128 = 0,
+    entry_candle_end_ns: i128 = 0,
 };
 
 pub const Position = struct {
