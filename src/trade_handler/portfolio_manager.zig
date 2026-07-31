@@ -38,6 +38,8 @@ const PortfolioPosition = struct {
     order_id: ?i64,
     last_observed_price: f64,
     last_observed_ms: i64,
+    last_processed_event_ms: i64,
+    stale_logged: bool,
 };
 
 pub const PortfolioManager = struct {
@@ -214,10 +216,13 @@ pub const PortfolioManager = struct {
         if (self.getOpenPositionSymbol()) |sym_name| {
             if (self.positions.getPtr(sym_name)) |pos| {
                 if (pos.is_open and pos.pivot_entry_price > 0.0 and now_ns < pos.candle_end_timestamp) {
-                    const current_price = symbol_map.getLastClosePrice(self.symbol_map, sym_name) catch {
+                    const quote = symbol_map.getMarketQuote(self.symbol_map, sym_name) catch {
                         return;
                     };
+                    const current_price = quote.price;
                     const now_ms: i64 = std.time.milliTimestamp();
+                    if (quote.exchange_event_ms <= pos.last_processed_event_ms) return;
+                    pos.last_processed_event_ms = quote.exchange_event_ms;
 
                     if (!std.math.isFinite(pos.last_observed_price) or pos.last_observed_price <= 0.0) {
                         pos.last_observed_price = current_price;
@@ -237,10 +242,7 @@ pub const PortfolioManager = struct {
                         .{
                             .previous_price = pos.last_observed_price,
                             .current_price = current_price,
-                            // Until the active-symbol WebSocket lands, the bulk-feed read time
-                            // is used as the event time. Gap and true-crossing protection are
-                            // active; upstream stale-feed detection requires exchange timestamps.
-                            .exchange_event_ms = now_ms,
+                            .exchange_event_ms = quote.exchange_event_ms,
                             .local_receive_ms = now_ms,
                         },
                         .{},
@@ -263,11 +265,21 @@ pub const PortfolioManager = struct {
                     );
 
                     switch (decision.action) {
-                        .none, .pause_stale => {
+                        .none => {
+                            pos.stale_logged = false;
+                            pos.last_observed_price = current_price;
+                            pos.last_observed_ms = now_ms;
+                        },
+                        .pause_stale => {
+                            if (!pos.stale_logged) {
+                                std.log.warn("[WS_STALE] symbol={s} data_age_ms={d}; new reversals paused while protective close remains armed", .{ sym_name, decision.data_age_ms });
+                                pos.stale_logged = true;
+                            }
                             pos.last_observed_price = current_price;
                             pos.last_observed_ms = now_ms;
                         },
                         .close_only_gap => {
+                            std.log.warn("[COND_TRIGGERED] symbol={s} action=close_only_gap trigger={d:.8} observed={d:.8}", .{ sym_name, decision.trigger_price, current_price });
                             std.log.warn(
                                 "[GAP_EXIT] {s}: closing {s} only; no immediate reversal. trigger={d:.8} observed={d:.8} jump_pct={d:.4} slippage_pct={d:.4}",
                                 .{
@@ -279,14 +291,19 @@ pub const PortfolioManager = struct {
                                     decision.trigger_slippage_fraction * 100.0,
                                 },
                             );
-                            _ = switch (pos.side) {
+                            const old_side = pos.side;
+                            const closed = switch (old_side) {
                                 .long => self.closeLong(pos, current_price),
                                 .short => self.closeShort(pos, current_price),
                                 .none => false,
                             };
+                            if (closed) {
+                                std.log.info("[COND_CLOSE_FILLED] symbol={s} side={s} fill={d:.8}", .{ sym_name, @tagName(old_side), current_price });
+                                std.log.info("[POSITION_RECONCILED_FLAT] symbol={s} reason=gap_exit", .{sym_name});
+                            }
                         },
-                        .reverse_to_long => self.flipPosition(pos, .long, current_price),
-                        .reverse_to_short => self.flipPosition(pos, .short, current_price),
+                        .reverse_to_long => self.executeConditionalReverse(pos, .long, current_price, decision.trigger_price),
+                        .reverse_to_short => self.executeConditionalReverse(pos, .short, current_price, decision.trigger_price),
                     }
                 }
             }
@@ -505,6 +522,20 @@ pub const PortfolioManager = struct {
         }
     }
 
+    fn executeConditionalReverse(self: *PortfolioManager, pos: *PortfolioPosition, desired_side: PositionSide, current_price: f64, trigger_price: f64) void {
+        const symbol_name = pos.symbol;
+        const old_side = pos.side;
+        std.log.info("[COND_TRIGGERED] symbol={s} close_side={s} reverse_to={s} trigger={d:.8} observed={d:.8}", .{ symbol_name, @tagName(old_side), @tagName(desired_side), trigger_price, current_price });
+        self.flipPosition(pos, desired_side, current_price);
+        if (pos.is_open and pos.side == desired_side) {
+            std.log.info("[COND_CLOSE_FILLED] symbol={s} closed_side={s} fill={d:.8}", .{ symbol_name, @tagName(old_side), current_price });
+            std.log.info("[POSITION_RECONCILED_FLAT] symbol={s} before_reverse=true", .{symbol_name});
+            std.log.info("[COND_REVERSE_FILLED] symbol={s} new_side={s} fill={d:.8}", .{ symbol_name, @tagName(desired_side), current_price });
+            const next_trigger = toggle_protection.triggerFor(if (desired_side == .long) .long else .short, pos.pivot_entry_price, .{});
+            std.log.info("[COND_REARMED] symbol={s} side={s} next_trigger={d:.8} pivot={d:.8}", .{ symbol_name, @tagName(desired_side), next_trigger, pos.pivot_entry_price });
+        }
+    }
+
     fn flipPosition(self: *PortfolioManager, pos: *PortfolioPosition, desired_side: PositionSide, current_price: f64) void {
         if (!pos.is_open or pos.side == desired_side or pos.side == .none) return;
 
@@ -561,6 +592,8 @@ pub const PortfolioManager = struct {
                 .order_id = null,
                 .last_observed_price = 0.0,
                 .last_observed_ms = 0,
+                .last_processed_event_ms = 0,
+                .stale_logged = false,
             }) catch unreachable;
         }
 
@@ -579,6 +612,10 @@ pub const PortfolioManager = struct {
         pos.order_id = order_id;
         pos.last_observed_price = entry_price;
         pos.last_observed_ms = std.time.milliTimestamp();
+        pos.last_processed_event_ms = 0;
+        pos.stale_logged = false;
+        const armed_trigger = toggle_protection.triggerFor(if (side == .long) .long else .short, pos.pivot_entry_price, .{});
+        std.log.info("[COND_ARMED] symbol={s} side={s} trigger={d:.8} pivot={d:.8} source=binance_miniTicker dry_run=true", .{ pos.symbol, @tagName(side), armed_trigger, pos.pivot_entry_price });
 
         if (self.trade_logger) |_| {
             // Trade logging temporarily disabled to avoid mismatches with TradeLogger API.

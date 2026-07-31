@@ -3,6 +3,7 @@ const SymbolMap = @import("../symbol-map.zig").SymbolMap;
 const metrics = @import("../metrics.zig");
 const std = @import("std");
 const rest_market_data = @import("rest_market_data.zig");
+const binance_ws = @import("binance_ws.zig");
 
 pub const DataAggregator = struct {
     symbol_map: *SymbolMap,
@@ -13,6 +14,7 @@ pub const DataAggregator = struct {
     metrics_thread: ?*std.Thread,
     metrics_collector: ?metrics.MetricsCollector,
     rest_market_data: ?*rest_market_data.RestMarketData,
+    ws_client: ?*binance_ws.WSClient,
 
     pub fn init(enable_metrics: bool, allocator: std.mem.Allocator) !DataAggregator {
         var metrics_channel: ?*metrics.MetricsChannel = null;
@@ -41,10 +43,17 @@ pub const DataAggregator = struct {
             .symbol_map = sym_map,
             .binance = binance_client,
             .rest_market_data = null,
+            .ws_client = null,
         };
     }
 
     pub fn deinit(self: *DataAggregator) void {
+        if (self.ws_client) |ws| {
+            ws.stopListener() catch |err| std.log.warn("Failed to stop Binance WS listener: {}", .{err});
+            ws.deinit();
+            self.allocator.destroy(ws);
+            self.ws_client = null;
+        }
         if (self.rest_market_data) |rest| {
             rest.deinit();
             self.allocator.destroy(rest);
@@ -81,6 +90,16 @@ pub const DataAggregator = struct {
         rest.* = rest_market_data.RestMarketData.init(self.allocator, self.symbol_map, self.binance.selected_endpoint);
         try rest.start();
         self.rest_market_data = rest;
+
+        const ws = try self.allocator.create(binance_ws.WSClient);
+        ws.* = try binance_ws.WSClient.init(self.allocator, if (self.enable_metrics) &self.metrics_collector.? else null);
+        ws.startListener(self.symbol_map) catch |err| {
+            std.log.warn("Active Binance miniTicker WebSocket unavailable; continuing with REST only: {}", .{err});
+            self.allocator.destroy(ws);
+            return;
+        };
+        self.ws_client = ws;
+        std.log.info("Active Binance miniTicker WebSocket started for event-driven toggle simulation", .{});
     }
 
     pub fn waitUntilReady(self: *DataAggregator, timeout_ms: u64) bool {

@@ -5,6 +5,11 @@ const GetPriceError = @import("errors.zig").GetPriceError;
 
 pub const SymbolMap = std.StringHashMap(Symbol);
 
+pub const MarketQuote = struct {
+    price: f64,
+    exchange_event_ms: i64,
+};
+
 pub fn dump(self: *const SymbolMap) void {
     var it = self.iterator();
     while (it.next()) |entry| {
@@ -22,6 +27,21 @@ pub fn dump(self: *const SymbolMap) void {
         std.log.info(" OrderBook Bids: {d} Asks: {d}", .{ symbol.orderbook.bids.len, symbol.orderbook.asks.len });
         symbol.orderbook.dump();
     }
+}
+
+pub fn getMarketQuote(self: *const SymbolMap, symbol: []const u8) GetPriceError!MarketQuote {
+    if (self.get(symbol)) |sym| {
+        if (sym.count == 0 or sym.last_price_update_time <= 0) {
+            return GetPriceError.NoPriceDataAvailable;
+        }
+        const latest_idx = (sym.head + 15 - 1) % 15;
+        const price = sym.ticker_queue[latest_idx].close_price;
+        if (!std.math.isFinite(price) or price <= 0.0) {
+            return GetPriceError.NoPriceDataAvailable;
+        }
+        return .{ .price = price, .exchange_event_ms = sym.last_price_update_time };
+    }
+    return GetPriceError.SymbolNotFound;
 }
 
 pub fn getLastClosePrice(self: *const SymbolMap, symbol: []const u8) GetPriceError!f64 {

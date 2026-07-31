@@ -93,18 +93,14 @@ pub const WSClient = struct {
             const ticker = try std.fmt.allocPrint(self.allocator, "{s}@miniTicker", .{sym_lower});
             try self.ticker_streams.append(ticker);
 
-            const kline = try std.fmt.allocPrint(self.allocator, "{s}@kline_15m", .{sym_lower});
-            try self.kline_streams.append(kline);
+            // Klines are intentionally not subscribed here. REST is authoritative
+            // for official 15m candle opens and fresh-candle readiness.
         }
 
         // ---- SUBSCRIBE TICKER ----
-        var ticker_and_kline = std.ArrayList([]const u8).init(self.allocator);
-        defer ticker_and_kline.deinit();
-        try ticker_and_kline.appendSlice(self.ticker_streams.items);
-        try ticker_and_kline.appendSlice(self.kline_streams.items);
         const tmsg = .{
             .method = "SUBSCRIBE",
-            .params = ticker_and_kline.items,
+            .params = self.ticker_streams.items,
             .id = 1,
         };
         const tjson = try json.stringifyAlloc(self.allocator, tmsg, .{});

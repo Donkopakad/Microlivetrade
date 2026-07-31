@@ -63,13 +63,8 @@ pub const TickerHandler = struct {
             self.mutex.lock();
             defer self.mutex.unlock();
             sym.addTicker(.{ .open_price = close_price, .high_price = close_price, .low_price = close_price, .close_price = close_price, .volume = 0.0 });
-            const candle_ms = @divFloor(event_time_ms, 900000) * 900000;
-            if (sym.candle_start_time == 0) {
-                // Temporary non-trading placeholder until the kline stream supplies the official open.
-                sym.candle_start_time = candle_ms;
-            } else if (candle_ms != sym.candle_start_time) {
-                sym.startNewCandle(candle_ms);
-            }
+            // REST remains authoritative for 15m candle boundaries and official opens.
+            // miniTicker supplies event-driven prices and Binance event timestamps only.
             sym.updateCurrentPrice(close_price, event_time_ms);
         }
     }
