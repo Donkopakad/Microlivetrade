@@ -96,41 +96,49 @@ replace(
     "consume each exchange event once",
 )
 replace(
+    "src/trade_handler/portfolio_manager.zig",
     "                            // Until the active-symbol WebSocket lands, the bulk-feed read time\n                            // is used as the event time. Gap and true-crossing protection are\n                            // active; upstream stale-feed detection requires exchange timestamps.\n                            .exchange_event_ms = now_ms,\n",
     "                            .exchange_event_ms = quote.exchange_event_ms,\n",
     "use Binance event timestamp",
 )
 replace(
+    "src/trade_handler/portfolio_manager.zig",
     "                        .none, .pause_stale => {\n                            pos.last_observed_price = current_price;\n                            pos.last_observed_ms = now_ms;\n                        },\n",
     "                        .none => {\n                            pos.stale_logged = false;\n                            pos.last_observed_price = current_price;\n                            pos.last_observed_ms = now_ms;\n                        },\n                        .pause_stale => {\n                            if (!pos.stale_logged) {\n                                std.log.warn(\"[WS_STALE] symbol={s} data_age_ms={d}; new reversals paused while protective close remains armed\", .{ sym_name, decision.data_age_ms });\n                                pos.stale_logged = true;\n                            }\n                            pos.last_observed_price = current_price;\n                            pos.last_observed_ms = now_ms;\n                        },\n",
     "stale-feed protection logging",
 )
 replace(
+    "src/trade_handler/portfolio_manager.zig",
     "                        .close_only_gap => {\n                            std.log.warn(\n",
     "                        .close_only_gap => {\n                            std.log.warn(\"[COND_TRIGGERED] symbol={s} action=close_only_gap trigger={d:.8} observed={d:.8}\", .{ sym_name, decision.trigger_price, current_price });\n                            std.log.warn(\n",
     "conditional gap trigger log",
 )
 replace(
+    "src/trade_handler/portfolio_manager.zig",
     "                            _ = switch (pos.side) {\n                                .long => self.closeLong(pos, current_price),\n                                .short => self.closeShort(pos, current_price),\n                                .none => false,\n                            };\n",
     "                            const old_side = pos.side;\n                            const closed = switch (old_side) {\n                                .long => self.closeLong(pos, current_price),\n                                .short => self.closeShort(pos, current_price),\n                                .none => false,\n                            };\n                            if (closed) {\n                                std.log.info(\"[COND_CLOSE_FILLED] symbol={s} side={s} fill={d:.8}\", .{ sym_name, @tagName(old_side), current_price });\n                                std.log.info(\"[POSITION_RECONCILED_FLAT] symbol={s} reason=gap_exit\", .{sym_name});\n                            }\n",
     "gap close fill and reconciliation",
 )
 replace(
+    "src/trade_handler/portfolio_manager.zig",
     "                        .reverse_to_long => self.flipPosition(pos, .long, current_price),\n                        .reverse_to_short => self.flipPosition(pos, .short, current_price),\n",
     "                        .reverse_to_long => self.executeConditionalReverse(pos, .long, current_price, decision.trigger_price),\n                        .reverse_to_short => self.executeConditionalReverse(pos, .short, current_price, decision.trigger_price),\n",
     "conditional reverse state machine",
 )
 replace(
+    "src/trade_handler/portfolio_manager.zig",
     "    fn flipPosition(self: *PortfolioManager, pos: *PortfolioPosition, desired_side: PositionSide, current_price: f64) void {\n",
     "    fn executeConditionalReverse(self: *PortfolioManager, pos: *PortfolioPosition, desired_side: PositionSide, current_price: f64, trigger_price: f64) void {\n        const symbol_name = pos.symbol;\n        const old_side = pos.side;\n        std.log.info(\"[COND_TRIGGERED] symbol={s} close_side={s} reverse_to={s} trigger={d:.8} observed={d:.8}\", .{ symbol_name, @tagName(old_side), @tagName(desired_side), trigger_price, current_price });\n        self.flipPosition(pos, desired_side, current_price);\n        if (pos.is_open and pos.side == desired_side) {\n            std.log.info(\"[COND_CLOSE_FILLED] symbol={s} closed_side={s} fill={d:.8}\", .{ symbol_name, @tagName(old_side), current_price });\n            std.log.info(\"[POSITION_RECONCILED_FLAT] symbol={s} before_reverse=true\", .{symbol_name});\n            std.log.info(\"[COND_REVERSE_FILLED] symbol={s} new_side={s} fill={d:.8}\", .{ symbol_name, @tagName(desired_side), current_price });\n            const next_trigger = toggle_protection.triggerFor(if (desired_side == .long) .long else .short, pos.pivot_entry_price, .{});\n            std.log.info(\"[COND_REARMED] symbol={s} side={s} next_trigger={d:.8} pivot={d:.8}\", .{ symbol_name, @tagName(desired_side), next_trigger, pos.pivot_entry_price });\n        }\n    }\n\n    fn flipPosition(self: *PortfolioManager, pos: *PortfolioPosition, desired_side: PositionSide, current_price: f64) void {\n",
     "conditional reverse helper",
 )
 replace(
+    "src/trade_handler/portfolio_manager.zig",
     "                .last_observed_ms = 0,\n",
     "                .last_observed_ms = 0,\n                .last_processed_event_ms = 0,\n                .stale_logged = false,\n",
     "initialize conditional fields",
 )
 replace(
+    "src/trade_handler/portfolio_manager.zig",
     "        pos.last_observed_ms = std.time.milliTimestamp();\n",
     "        pos.last_observed_ms = std.time.milliTimestamp();\n        pos.last_processed_event_ms = 0;\n        pos.stale_logged = false;\n        const armed_trigger = toggle_protection.triggerFor(if (side == .long) .long else .short, pos.pivot_entry_price, .{});\n        std.log.info(\"[COND_ARMED] symbol={s} side={s} trigger={d:.8} pivot={d:.8} source=binance_miniTicker dry_run=true\", .{ pos.symbol, @tagName(side), armed_trigger, pos.pivot_entry_price });\n",
     "arm simulated conditional after fill",
